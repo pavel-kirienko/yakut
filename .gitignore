@@ -3,6 +3,7 @@ __pycache__/
 *.so
 .Python
 env/
+venv/
 build/
 _build/
 develop-eggs/
