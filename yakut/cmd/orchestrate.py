@@ -21,16 +21,12 @@ from yakut.yaml import YAMLLoader, YAMLDumper
 _logger = logging.getLogger(__name__)
 
 _NAME_SEP = "."
-"""
-From the UAVCAN Specification.
-"""
-
 _ITEM_SEP = " "
 
 _NOT_ENV = "="
-"""
-Equals sign is the only character that cannot occur in an environment variable name in most OS.
-"""
+"""Equals sign is the only character that cannot occur in an environment variable name in most OS."""
+
+_POLL_INTERVAL = 0.1
 
 
 class SchemaError(ValueError):
@@ -47,103 +43,134 @@ def orchestrate(yaml: str) -> None:
     """
     Execute an orchestration file.
     """
-    _logger.debug("Orchestrating %r", yaml)
-    orc = Orchestrator()
+    interrupted = False
 
     def on_signal(s: int, _: Any) -> None:
+        nonlocal interrupted
+        interrupted = True
         _logger.info("Orchestrator received signal %s %r, stopping", s, signal.strsignal(s))
-        orc.stop(-s)
 
     for sig in [signal.SIGABRT, signal.SIGINT, signal.SIGTERM]:
         signal.signal(sig, on_signal)
     if sys.platform.startswith("win"):
         signal.signal(signal.SIGBREAK, on_signal)
 
-    exit(orc.execute_file(Path(yaml).resolve(), {}))
+    res = exec_file("", Path(yaml).resolve(), {}, predicate=lambda: not interrupted)
+
+    exit(-1 if interrupted and (res == 0) else res)
 
 
-class Orchestrator:
-    def __init__(self, poll_interval: float = 0.1, kill_timeout: float = 10.0) -> None:
-        # TODO: ADD SOME KIND OF NAME FOR IDENTIFICATION PURPOSES.
-        self._return_code: Optional[int] = None
-        self._poll_interval = float(poll_interval)
-        self._kill_timeout = float(kill_timeout)
+FlagDelegate = Callable[[], bool]
 
-    def stop(self, return_code: int) -> None:
-        if self._return_code is None or self._return_code == 0:
-            self._return_code = return_code
-        else:
-            _logger.info(
-                "Stop request with return code %r ignored because another one with code %r is already pending",
-                return_code,
-                self._return_code,
-            )
 
-    def execute_file(self, yaml_file: Path, env: Dict[str, str]) -> int:
-        comp = _parse(_load_yaml(yaml_file), env)
-        if _logger.isEnabledFor(logging.DEBUG):
-            _logger.debug("Parsed file %s with env keys %s:\n%s", yaml_file, list(env), YAMLDumper().dumps(comp))
-        return self._execute_composition(comp)
+def exec_file(loc: str, yaml_file: Path, env: Dict[str, str], *, predicate: FlagDelegate) -> int:
+    _log_execution_point(loc, str(yaml_file.resolve()))
+    comp = _parse(_load_yaml(yaml_file), env)
+    _logger.debug("Parsed file %s with env keys %s", yaml_file, list(env))
+    return exec_composition(f"{loc}/{str(yaml_file)!r}", comp, predicate=predicate)
 
-    def _execute_composition(self, comp: Composition) -> int:
-        pass
 
-    def _execute_script_sequential(self, scr: Script, env: Dict[str, str]) -> int:
-        for idx, line in enumerate(scr):
-            _logger.debug("Executing sequentially (%d/%d): %s", idx + 1, len(scr), line)
-            if isinstance(line, str):
-                ret = self._execute_shell(line, env)
-            elif isinstance(line, Composition):
-                ret = self._execute_composition(line)
-            else:
-                assert False
-            if ret != 0:
-                return ret
+def exec_composition(loc: str, comp: Composition, *, predicate: FlagDelegate) -> int:
+    res = exec_script(f"{loc}/?", comp.predicate, comp.env, kill_timeout=comp.kill_timeout, predicate=predicate)
+    if res != 0:  # If any of the commands of the predicate fails, we simply skip the rest and report success.
         return 0
 
-    def _execute_script_concurrent(self, scr: Script, env: Dict[str, str]) -> None:
-        from concurrent.futures import Future, ThreadPoolExecutor, wait, ALL_COMPLETED, as_completed
+    res = exec_script(f"{loc}/$", comp.start, comp.env, kill_timeout=comp.kill_timeout, predicate=predicate)
+    if res != 0:
+        return res
 
+    return exec_script(f"{loc}/.", comp.stop, comp.env, kill_timeout=comp.kill_timeout, predicate=predicate)
+
+
+def exec_script(
+    loc: str, scr: List[Statement], env: Dict[str, str], *, kill_timeout: float, predicate: FlagDelegate
+) -> int:
+    from concurrent.futures import Future, ThreadPoolExecutor, wait
+
+    if not scr:
+        return 0  # We have successfully done nothing. Hard to fail that.
+
+    go_on = True
+
+    def inner_predicate() -> bool:
+        return go_on and predicate()
+
+    def update_stop_condition(result: int) -> int:
+        nonlocal go_on
+        assert isinstance(result, int)
+        go_on = go_on and (result == 0)
+        return result
+
+    def launch_shell(inner_loc: str, cmd: str) -> Future[int]:
+        return executor.submit(
+            lambda: update_stop_condition(
+                exec_shell(inner_loc, cmd, env.copy(), kill_timeout=kill_timeout, predicate=inner_predicate)
+            )
+        )
+
+    def launch_composition(inner_loc: str, comp: Composition) -> Future[int]:
+        return executor.submit(
+            lambda: update_stop_condition(exec_composition(inner_loc, comp, predicate=inner_predicate))
+        )
+
+    try:
         executor = ThreadPoolExecutor(max_workers=len(scr))
-        futures: List[Future[int]] = []
-        try:
-            for idx, line in enumerate(scr):
-                _logger.debug("Executing concurrently (%d/%d): %s", idx + 1, len(scr), line)
-                if isinstance(line, str):
-                    fut = executor.submit(self._execute_shell, line, env.copy())
-                elif isinstance(line, Composition):
-                    fut = executor.submit(self._execute_composition, line)
-                else:
-                    assert False
-                futures.append(fut)
+        pending: List[Future[int]] = []
+        for index, stmt in enumerate(scr):
+            stmt_loc = f"{loc}/{index}"
+            if not inner_predicate():
+                break
+            if isinstance(stmt, ShellStatement):
+                pending.append(launch_shell(stmt_loc, stmt.cmd))
+            elif isinstance(stmt, CompositionStatement):
+                pending.append(launch_composition(stmt_loc, stmt.comp))
+            elif isinstance(stmt, JoinStatement):
+                num_pending = sum(1 for x in pending if not x.done())
+                _log_execution_point(stmt_loc, f"waiting for {num_pending} statements")
+                wait(pending)
+            else:
+                assert False
 
-            for fut in as_completed(futures):
-                ret = fut.result()
-                if ret != 0:
-                    self.stop(ret)
-        except Exception as ex:  # On error, make sure to clean up the futures before exiting.
-            _logger.info("Terminating concurrent script prematurely due to exception: %s", ex, exc_info=True)
-            self._return_code = 1  # This will trigger termination in all processes up and down the call stack.
-            wait(futures, return_when=ALL_COMPLETED)
-            raise
-        finally:
-            _logger.debug("Concurrent script completed")
-
-    def _execute_shell(self, cmd: str, env: Dict[str, str]) -> int:
-        child = Shell(cmd, env)
-        try:
-            ret: Optional[int] = None
-            while self._return_code is None and ret is None:
-                ret = child.poll(self._poll_interval)
-            child.initiate_stopping_sequence(self._kill_timeout * 0.5, self._kill_timeout)
-            while ret is None:
-                ret = child.poll(self._poll_interval)
-            return ret
-        finally:
-            child.ensure_dead()
+        # Wait for all processes to complete and then aggregate the results.
+        done, not_done = wait(pending)
+        assert not not_done
+        results = list(x.result() for x in done)
+        if not results or (set(results) == {0}):
+            return 0
+        res = list(sorted(results, key=lambda x: -abs(x)))[0]
+        assert res != 0
+        return res
+    finally:
+        go_on = False  # Terminate processes in the event of an exception.
 
 
-class Shell:
+def exec_shell(loc: str, cmd: str, env: Dict[str, str], *, kill_timeout: float, predicate: FlagDelegate) -> int:
+    _log_execution_point(loc, f"executing: {cmd}")
+    longest_env_name = max(len(x) for x in env)
+    for k, v in env.items():
+        _log_execution_point(loc, "envvar: " + k.ljust(longest_env_name) + f" = {v!r}")
+
+    ch = Child(cmd, env)
+    try:
+        ret: Optional[int] = None
+        while predicate() and ret is None:
+            ret = ch.poll(_POLL_INTERVAL)
+        if ret is None:
+            _log_execution_point(loc, "stopping")
+            ch.initiate_stopping_sequence(kill_timeout * 0.5, kill_timeout)
+        while ret is None:
+            ret = ch.poll(_POLL_INTERVAL)
+        _log_execution_point(loc, f"exit code: {ret}")
+        return ret
+    finally:
+        ch.ensure_dead()  # Terminate process in the event of an exception.
+
+
+def _log_execution_point(loc: str, text: str) -> None:
+    _logger.info("@%s: %s", loc, text)
+
+
+class Child:
     def __init__(self, cmd: str, env: Dict[str, str]) -> None:
         from subprocess import Popen, PIPE, DEVNULL
 
@@ -151,8 +178,6 @@ class Shell:
         e.update(env)
         self._proc = Popen(cmd, env=e, shell=True, text=True, stdout=PIPE, stderr=PIPE, stdin=DEVNULL, bufsize=1)
         self._return: Optional[int] = None
-        _logger.info("%s: Executing:\n%s", self, cmd)
-
         self._signaling_schedule: List[Tuple[float, Callable[[], None]]] = []
         self._prefix_stdout = click.style(f"STDOUT{self.pid: 8d}: ", fg="green", bold=True)
         self._prefix_stderr = click.style(f"STDERR{self.pid: 8d}: ", fg="yellow", bold=True)
@@ -176,7 +201,7 @@ class Shell:
 
         if self._return is None and self._proc.returncode is not None:
             self._return = self._proc.returncode
-            _logger.info("%s: Exited with code %d", self, self._return)
+            _logger.debug("%s: Exited with code %d", self, self._return)
 
         return self._return
 
@@ -185,7 +210,7 @@ class Shell:
             return
 
         give_up_after = max(give_up_after, escalate_after)
-        _logger.info(
+        _logger.debug(
             "%s: Interrupting. Escalation timeout: %.1f, give-up timeout: %.1f", self, escalate_after, give_up_after
         )
         # FIXME: on Windows, killing the shell process does not terminate its children.
@@ -210,19 +235,37 @@ class Shell:
         self._proc.kill()
 
     def __str__(self) -> str:
-        return f"Shell {self.pid:07d}"
+        return f"Child {self.pid:07d}"
 
 
 @dataclasses.dataclass(frozen=True)
 class Composition:
-    opt: Script
-    seq: Script
-    par: Script
-    end: Script
+    predicate: List[Statement]
+    start: List[Statement]
+    stop: List[Statement]
     env: Dict[str, str]
 
+    kill_timeout: float = 20.0
 
-Script = List[Union[str, Composition]]
+
+@dataclasses.dataclass(frozen=True)
+class Statement:
+    pass
+
+
+@dataclasses.dataclass(frozen=True)
+class ShellStatement(Statement):
+    cmd: str
+
+
+@dataclasses.dataclass(frozen=True)
+class CompositionStatement(Statement):
+    comp: Composition
+
+
+@dataclasses.dataclass(frozen=True)
+class JoinStatement(Statement):
+    pass
 
 
 def _load_yaml(yaml_file: Path) -> Dict[Any, Any]:
@@ -242,13 +285,13 @@ def _parse(ast: Dict[Any, Any], env: Dict[str, str]) -> Composition:
     if not isinstance(ast, dict):
         raise SchemaError(f"The composition shall be a dict, not {type(ast).__name__}")
 
-    extend = ast.pop("=extend", None)
+    extend = ast.pop("=import", None)
     if extend is not None:
         if not isinstance(extend, str):
             raise SchemaError(f"Invalid extend specifier: {extend!r}")
         ext = _parse(_load_yaml(Path(extend)), env.copy())
     else:
-        ext = Composition(opt=[], seq=[], par=[], end=[], env=env.copy())
+        ext = Composition(predicate=[], start=[], stop=[], env=env.copy())
     del env
 
     for name, value in _flatten_registers({k: v for k, v in ast.items() if isinstance(k, str) and _NOT_ENV not in k}):
@@ -258,10 +301,9 @@ def _parse(ast: Dict[Any, Any], env: Dict[str, str]) -> Composition:
         ext.env[name] = str(value)
 
     out = Composition(
-        opt=_parse_script(ast.pop("=optional", []), ext.env) + ext.opt,
-        seq=_parse_script(ast.pop("=sequential", []), ext.env) + ext.seq,
-        par=_parse_script(ast.pop("=concurrent", []), ext.env) + ext.par,
-        end=_parse_script(ast.pop("=final", []), ext.env) + ext.end,
+        predicate=_parse_script(ast.pop("=?", []), ext.env) + ext.predicate,
+        start=_parse_script(ast.pop("=$", []), ext.env) + ext.start,
+        stop=_parse_script(ast.pop("=.", []), ext.env) + ext.stop,
         env=ext.env,
     )
     unattended = [k for k in ast if _NOT_ENV in k]
@@ -270,18 +312,20 @@ def _parse(ast: Dict[Any, Any], env: Dict[str, str]) -> Composition:
     return out
 
 
-def _parse_script(ast: Any, env: Dict[str, str]) -> Script:
+def _parse_script(ast: Any, env: Dict[str, str]) -> List[Statement]:
     if isinstance(ast, list):
-        return [_parse_script_item(x, env) for x in ast]
-    return [_parse_script_item(ast, env)]
+        return [_parse_statement(x, env) for x in ast]
+    return [_parse_statement(ast, env)]
 
 
-def _parse_script_item(ast: Any, env: Dict[str, str]) -> Union[str, Composition]:
+def _parse_statement(ast: Any, env: Dict[str, str]) -> Statement:
     if isinstance(ast, str):
-        return ast
+        return ShellStatement(ast)
     if isinstance(ast, dict):
-        return _parse(ast, env)
-    raise SchemaError("Script item shall be either: string (command to run), dict (nested schema)")
+        return CompositionStatement(_parse(ast, env))
+    if ast is None:
+        return JoinStatement()
+    raise SchemaError("Statement shall be either: string (command to run), dict (nested schema), null (join)")
 
 
 @lru_cache(None)
