@@ -4,18 +4,19 @@
 
 from __future__ import annotations
 import os
+import io
 import sys
 import time
-import errno
 import signal
 import dataclasses
+from concurrent.futures import Future, ThreadPoolExecutor, wait
 from typing import Dict, List, Any, Tuple, Union, Optional, Callable
 from functools import lru_cache
 from pathlib import Path
 import logging
 import click
 import yakut
-from yakut.yaml import YAMLLoader, YAMLDumper
+from yakut.yaml import YAMLLoader
 
 
 _logger = logging.getLogger(__name__)
@@ -26,7 +27,7 @@ _ITEM_SEP = " "
 _NOT_ENV = "="
 """Equals sign is the only character that cannot occur in an environment variable name in most OS."""
 
-_POLL_INTERVAL = 0.1
+_POLL_INTERVAL = 0.05
 
 
 class SchemaError(ValueError):
@@ -38,84 +39,89 @@ class EnvironmentVariableError(SchemaError):
 
 
 @yakut.subcommand()
-@click.argument("yaml", type=click.Path(exists=True, dir_okay=False, resolve_path=True, allow_dash=True, path_type=str))
-def orchestrate(yaml: str) -> None:
+@click.argument("yaml_file", type=str)
+def orchestrate(yaml_file: str) -> None:
     """
     Execute an orchestration file.
     """
-    interrupted = False
+    sig_num = 0
 
     def on_signal(s: int, _: Any) -> None:
-        nonlocal interrupted
-        interrupted = True
+        nonlocal sig_num
+        sig_num = s
         _logger.info("Orchestrator received signal %s %r, stopping", s, signal.strsignal(s))
 
     for sig in [signal.SIGABRT, signal.SIGINT, signal.SIGTERM]:
         signal.signal(sig, on_signal)
     if sys.platform.startswith("win"):
         signal.signal(signal.SIGBREAK, on_signal)
+    else:
+        signal.signal(signal.SIGHUP, on_signal)
 
-    res = exec_file("", Path(yaml).resolve(), {}, predicate=lambda: not interrupted)
+    res = exec_file("", yaml_file, {}, predicate=lambda: sig_num == 0)
 
-    exit(-1 if interrupted and (res == 0) else res)
+    exit(res if res != 0 else sig_num)
 
 
 FlagDelegate = Callable[[], bool]
 
 
-def exec_file(loc: str, yaml_file: Path, env: Dict[str, str], *, predicate: FlagDelegate) -> int:
-    _log_execution_point(loc, str(yaml_file.resolve()))
-    comp = _parse(_load_yaml(yaml_file), env)
+def exec_file(loc: str, yaml_file: str, env: Dict[str, str], *, predicate: FlagDelegate) -> int:
+    # TODO: locate YAML in YAKUT_PATH
+    _log_execution_point(loc, yaml_file)
+    comp = _parse(_load_yaml(Path(yaml_file)), env)
     _logger.debug("Parsed file %s with env keys %s", yaml_file, list(env))
     return exec_composition(f"{loc}/{str(yaml_file)!r}", comp, predicate=predicate)
 
 
 def exec_composition(loc: str, comp: Composition, *, predicate: FlagDelegate) -> int:
-    res = exec_script(f"{loc}/?", comp.predicate, comp.env, kill_timeout=comp.kill_timeout, predicate=predicate)
+    def do(inner_loc: str, scr: List[Statement]) -> int:
+        return exec_script(inner_loc, scr, comp.env, kill_timeout=comp.kill_timeout, predicate=predicate)
+
+    def finalize() -> int:
+        return do(f"{loc}/final", comp.finalizer)
+
+    res = do(f"{loc}/pred", comp.predicate)
     if res != 0:  # If any of the commands of the predicate fails, we simply skip the rest and report success.
         return 0
 
-    res = exec_script(f"{loc}/$", comp.start, comp.env, kill_timeout=comp.kill_timeout, predicate=predicate)
-    if res != 0:
+    res = do(f"{loc}/main", comp.main)
+    if res != 0:  # The return code of a composition is that of the first failed process.
+        finalize()
         return res
-
-    return exec_script(f"{loc}/.", comp.stop, comp.env, kill_timeout=comp.kill_timeout, predicate=predicate)
+    return finalize()
 
 
 def exec_script(
     loc: str, scr: List[Statement], env: Dict[str, str], *, kill_timeout: float, predicate: FlagDelegate
 ) -> int:
-    from concurrent.futures import Future, ThreadPoolExecutor, wait
-
     if not scr:
         return 0  # We have successfully done nothing. Hard to fail that.
 
-    go_on = True
+    first_failure_code: Optional[int] = None
 
     def inner_predicate() -> bool:
-        return go_on and predicate()
+        return (first_failure_code is None) and predicate()
 
-    def update_stop_condition(result: int) -> int:
-        nonlocal go_on
+    def accept_result(result: int) -> None:
+        nonlocal first_failure_code
         assert isinstance(result, int)
-        go_on = go_on and (result == 0)
-        return result
+        if result != 0 and first_failure_code is None:
+            first_failure_code = result  # Script ALWAYS returns the code of the FIRST FAILED statement.
 
-    def launch_shell(inner_loc: str, cmd: str) -> Future[int]:
+    def launch_shell(inner_loc: str, cmd: str) -> Future[None]:
         return executor.submit(
-            lambda: update_stop_condition(
+            lambda: accept_result(
                 exec_shell(inner_loc, cmd, env.copy(), kill_timeout=kill_timeout, predicate=inner_predicate)
             )
         )
 
-    def launch_composition(inner_loc: str, comp: Composition) -> Future[int]:
-        return executor.submit(
-            lambda: update_stop_condition(exec_composition(inner_loc, comp, predicate=inner_predicate))
-        )
+    def launch_composition(inner_loc: str, comp: Composition) -> Future[None]:
+        return executor.submit(lambda: accept_result(exec_composition(inner_loc, comp, predicate=inner_predicate)))
 
+    executor = ThreadPoolExecutor(max_workers=len(scr))
+    pending: List[Future[None]] = []
     try:
-        executor = ThreadPoolExecutor(max_workers=len(scr))
-        pending: List[Future[int]] = []
         for index, stmt in enumerate(scr):
             stmt_loc = f"{loc}/{index}"
             if not inner_predicate():
@@ -131,17 +137,17 @@ def exec_script(
             else:
                 assert False
 
-        # Wait for all processes to complete and then aggregate the results.
+        # Wait for all statements to complete and then aggregate the results.
         done, not_done = wait(pending)
         assert not not_done
-        results = list(x.result() for x in done)
-        if not results or (set(results) == {0}):
-            return 0
-        res = list(sorted(results, key=lambda x: -abs(x)))[0]
-        assert res != 0
-        return res
-    finally:
-        go_on = False  # Terminate processes in the event of an exception.
+        _ = list(x.result() for x in done)  # Collect results explicitly to propagate exceptions.
+        if first_failure_code is not None:
+            assert first_failure_code != 0
+            return first_failure_code
+        return 0
+    except Exception:
+        first_failure_code = 1
+        raise
 
 
 def exec_shell(loc: str, cmd: str, env: Dict[str, str], *, kill_timeout: float, predicate: FlagDelegate) -> int:
@@ -150,7 +156,14 @@ def exec_shell(loc: str, cmd: str, env: Dict[str, str], *, kill_timeout: float, 
     for k, v in env.items():
         _log_execution_point(loc, "envvar: " + k.ljust(longest_env_name) + f" = {v!r}")
 
-    ch = Child(cmd, env)
+    ch = Child(
+        cmd,
+        env,
+        line_handler_stdout=lambda s: click.echo(click.style(f"stdout {ch.pid:07d}: ", fg="green", bold=True) + s),
+        line_handler_stderr=lambda s: click.echo(click.style(f"stderr {ch.pid:07d}: ", fg="yellow", bold=True) + s),
+    )
+    _log_execution_point(loc, f"pid: {ch.pid}")
+    click.echo(click.style(f"Executing with PID={ch.pid:07d}: ", fg="blue", bold=True) + cmd)
     try:
         ret: Optional[int] = None
         while predicate() and ret is None:
@@ -171,68 +184,105 @@ def _log_execution_point(loc: str, text: str) -> None:
 
 
 class Child:
-    def __init__(self, cmd: str, env: Dict[str, str]) -> None:
+    _STREAM_BUFFER_SIZE = 1024 ** 2
+    _STREAM_POLL_INTERVAL = 0.01
+
+    def __init__(
+        self,
+        cmd: str,
+        env: Dict[str, str],
+        line_handler_stdout: Callable[[str], None],
+        line_handler_stderr: Callable[[str], None],
+    ) -> None:
         from subprocess import Popen, PIPE, DEVNULL
 
         e = os.environ.copy()
         e.update(env)
-        self._proc = Popen(cmd, env=e, shell=True, text=True, stdout=PIPE, stderr=PIPE, stdin=DEVNULL, bufsize=1)
+        self._proc = Popen(
+            cmd,
+            env=e,
+            shell=True,
+            text=True,
+            stdout=PIPE,
+            stderr=PIPE,
+            stdin=DEVNULL,
+            bufsize=Child._STREAM_BUFFER_SIZE,
+        )
         self._return: Optional[int] = None
-        self._signaling_schedule: List[Tuple[float, Callable[[], None]]] = []
-        self._prefix_stdout = click.style(f"STDOUT{self.pid: 8d}: ", fg="green", bold=True)
-        self._prefix_stderr = click.style(f"STDERR{self.pid: 8d}: ", fg="yellow", bold=True)
+        self._executor = ThreadPoolExecutor(max_workers=10)
+        self._futures = {
+            self._executor.submit(self._forward_line_by_line, self._proc.stdout, line_handler_stdout),
+            self._executor.submit(self._forward_line_by_line, self._proc.stderr, line_handler_stderr),
+        }
+        _logger.debug("%s: Executing %r with env %r", self, cmd, env)
 
     @property
     def pid(self) -> int:
         return self._proc.pid
 
     def poll(self, timeout: float) -> Optional[int]:
-        if self._signaling_schedule:
-            deadline, handler = self._signaling_schedule[0]
-            if time.monotonic() >= deadline:
-                self._signaling_schedule.pop(0)
-                handler()
+        # Propagate exceptions, if any, from the background tasks.
+        done, self._futures = wait(self._futures, timeout=0)
+        for f in done:
+            f.result()
 
-        stdout, stderr = self._proc.communicate(timeout=timeout)
-        for s in stdout.splitlines():
-            _echo(self._prefix_stdout + s)
-        for s in stderr.splitlines():
-            _echo(self._prefix_stderr + s)
-
-        if self._return is None and self._proc.returncode is not None:
-            self._return = self._proc.returncode
-            _logger.debug("%s: Exited with code %d", self, self._return)
-
+        if self._return is None:
+            ret = self._proc.poll()
+            if ret is None:
+                time.sleep(timeout)
+                ret = self._proc.poll()
+            if ret is not None:
+                self._return = ret
+                _logger.debug("%s: Exited with code %d", self, self._return)
         return self._return
 
     def initiate_stopping_sequence(self, escalate_after: float, give_up_after: float) -> None:
-        if self._return is not None:
+        if self._return is not None or self._proc.poll() is not None:
             return
-
-        give_up_after = max(give_up_after, escalate_after)
         _logger.debug(
             "%s: Interrupting. Escalation timeout: %.1f, give-up timeout: %.1f", self, escalate_after, give_up_after
         )
         # FIXME: on Windows, killing the shell process does not terminate its children.
-        # TODO: use psutil to manually kill off the children one by one.
+        # TODO: use psutil to manually hunt down each child and kill them off one by one.
         self._proc.send_signal(signal.SIGBREAK if sys.platform.startswith("win") else signal.SIGINT)
 
-        def term() -> None:
-            _logger.warning("%s: Interrupt signal had no effect, trying to terminate")
+        def do_stop() -> None:
+            time.sleep(escalate_after)
+            if self._proc.poll() is not None:
+                return
+            _logger.warning("%s: Interrupt signal had no effect, trying to terminate", self)
             self._proc.send_signal(signal.SIGTERM)
-
-        def kill() -> None:
+            time.sleep(give_up_after - escalate_after)
+            if self._proc.poll() is not None:
+                return
             _logger.error("%s: Termination signal had no effect, giving up by killing and abandoning the child", self)
-            self._proc.send_signal(signal.SIGABRT if sys.platform.startswith("win") else signal.SIGKILL)
-            self._return = -errno.ETIMEDOUT
+            sig = signal.SIGABRT if sys.platform.startswith("win") else signal.SIGKILL
+            self._proc.send_signal(sig)
+            if self._return is None:
+                self._return = -sig
 
-        self._signaling_schedule = [
-            (time.monotonic() + escalate_after, term),
-            (time.monotonic() + give_up_after, kill),
-        ]
+        self._futures.add(self._executor.submit(do_stop))
 
     def ensure_dead(self) -> None:
         self._proc.kill()
+
+    def _forward_line_by_line(self, stream: io.TextIOWrapper, line_handler: Callable[[str], None]) -> None:
+        buf = io.StringIO()
+        while True:
+            ch = stream.read(1)
+            if ch:
+                if ch == "\n":
+                    line_handler(buf.getvalue())
+                    buf = io.StringIO()
+                else:
+                    buf.write(ch)
+            elif self._return is not None or self._proc.poll() is not None:
+                break
+            else:
+                time.sleep(Child._STREAM_POLL_INTERVAL)
+        if buf.getvalue():
+            line_handler(buf.getvalue())
+        _logger.debug("%s: Stream forwarder stopped")
 
     def __str__(self) -> str:
         return f"Child {self.pid:07d}"
@@ -241,8 +291,8 @@ class Child:
 @dataclasses.dataclass(frozen=True)
 class Composition:
     predicate: List[Statement]
-    start: List[Statement]
-    stop: List[Statement]
+    main: List[Statement]
+    finalizer: List[Statement]
     env: Dict[str, str]
 
     kill_timeout: float = 20.0
@@ -291,7 +341,7 @@ def _parse(ast: Dict[Any, Any], env: Dict[str, str]) -> Composition:
             raise SchemaError(f"Invalid extend specifier: {extend!r}")
         ext = _parse(_load_yaml(Path(extend)), env.copy())
     else:
-        ext = Composition(predicate=[], start=[], stop=[], env=env.copy())
+        ext = Composition(predicate=[], main=[], finalizer=[], env=env.copy())
     del env
 
     for name, value in _flatten_registers({k: v for k, v in ast.items() if isinstance(k, str) and _NOT_ENV not in k}):
@@ -302,8 +352,8 @@ def _parse(ast: Dict[Any, Any], env: Dict[str, str]) -> Composition:
 
     out = Composition(
         predicate=_parse_script(ast.pop("=?", []), ext.env) + ext.predicate,
-        start=_parse_script(ast.pop("=$", []), ext.env) + ext.start,
-        stop=_parse_script(ast.pop("=.", []), ext.env) + ext.stop,
+        main=_parse_script(ast.pop("=run", []), ext.env) + ext.main,
+        finalizer=_parse_script(ast.pop("=end", []), ext.env) + ext.finalizer,
         env=ext.env,
     )
     unattended = [k for k in ast if _NOT_ENV in k]
@@ -443,10 +493,3 @@ def _flatten_registers(spec: Dict[str, Any], prefix: str = "") -> Dict[str, Any]
         else:
             out[name] = v
     return out
-
-
-def _echo(text: str, **styles: Union[str, bool]) -> None:
-    if styles:
-        click.secho(text, err=True, **styles)
-    else:
-        click.echo(text, err=True)
