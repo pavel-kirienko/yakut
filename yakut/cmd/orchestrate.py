@@ -11,7 +11,7 @@ import signal
 import dataclasses
 from concurrent.futures import Future, ThreadPoolExecutor, wait
 from typing import Dict, List, Any, Tuple, Union, Optional, Callable
-from functools import lru_cache
+from functools import lru_cache, partial
 from pathlib import Path
 import logging
 import click
@@ -68,24 +68,28 @@ FlagDelegate = Callable[[], bool]
 
 def exec_file(loc: str, yaml_file: str, env: Dict[str, str], *, predicate: FlagDelegate) -> int:
     # TODO: locate YAML in YAKUT_PATH
-    _log_execution_point(loc, yaml_file)
-    comp = _parse(_load_yaml(Path(yaml_file)), env)
+    _log_execution(loc, yaml_file)
+    comp = parse_composition(_load_yaml(Path(yaml_file)), env)
     _logger.debug("Parsed file %s with env keys %s", yaml_file, list(env))
     return exec_composition(f"{loc}/{str(yaml_file)!r}", comp, predicate=predicate)
 
 
 def exec_composition(loc: str, comp: Composition, *, predicate: FlagDelegate) -> int:
     def do(inner_loc: str, scr: List[Statement]) -> int:
-        return exec_script(inner_loc, scr, comp.env, kill_timeout=comp.kill_timeout, predicate=predicate)
+        started_at = time.monotonic()
+        res = exec_script(inner_loc, scr, comp.env, kill_timeout=comp.kill_timeout, predicate=predicate)
+        elapsed = time.monotonic() - started_at
+        _log_execution(inner_loc, f"script exit status={res} elapsed={elapsed:.1f}")
+        return res
 
     def finalize() -> int:
-        return do(f"{loc}/final", comp.finalizer)
+        return do(f"{loc}/.", comp.finalizer)
 
-    res = do(f"{loc}/pred", comp.predicate)
+    res = do(f"{loc}/?", comp.predicate)
     if res != 0:  # If any of the commands of the predicate fails, we simply skip the rest and report success.
         return 0
 
-    res = do(f"{loc}/main", comp.main)
+    res = do(f"{loc}/$", comp.main)
     if res != 0:  # The return code of a composition is that of the first failed process.
         finalize()
         return res
@@ -95,6 +99,9 @@ def exec_composition(loc: str, comp: Composition, *, predicate: FlagDelegate) ->
 def exec_script(
     loc: str, scr: List[Statement], env: Dict[str, str], *, kill_timeout: float, predicate: FlagDelegate
 ) -> int:
+    """
+    :return: Exit code of the first statement to fail. Zero if all have succeeded.
+    """
     if not scr:
         return 0  # We have successfully done nothing. Hard to fail that.
 
@@ -132,7 +139,7 @@ def exec_script(
                 pending.append(launch_composition(stmt_loc, stmt.comp))
             elif isinstance(stmt, JoinStatement):
                 num_pending = sum(1 for x in pending if not x.done())
-                _log_execution_point(stmt_loc, f"waiting for {num_pending} statements")
+                _log_execution(stmt_loc, f"waiting on {num_pending} statements")
                 wait(pending)
             else:
                 assert False
@@ -151,36 +158,42 @@ def exec_script(
 
 
 def exec_shell(loc: str, cmd: str, env: Dict[str, str], *, kill_timeout: float, predicate: FlagDelegate) -> int:
-    _log_execution_point(loc, f"executing: {cmd}")
-    longest_env_name = max(len(x) for x in env)
-    for k, v in env.items():
-        _log_execution_point(loc, "envvar: " + k.ljust(longest_env_name) + f" = {v!r}")
-
+    started_at = time.monotonic()
     ch = Child(
         cmd,
         env,
-        line_handler_stdout=lambda s: click.echo(click.style(f"stdout {ch.pid:07d}: ", fg="green", bold=True) + s),
-        line_handler_stderr=lambda s: click.echo(click.style(f"stderr {ch.pid:07d}: ", fg="yellow", bold=True) + s),
+        line_handler_stdout=partial(print),
+        line_handler_stderr=partial(print, file=sys.stderr),
     )
-    _log_execution_point(loc, f"pid: {ch.pid}")
-    click.echo(click.style(f"Executing with PID={ch.pid:07d}: ", fg="blue", bold=True) + cmd)
+    cli_prefix = f"[PID {ch.pid:07d}] "
     try:
+        _log_execution(loc, f"shell pid={ch.pid:07d} env={env} cmd=\\\n{cmd}")
+        click.echo(
+            click.style(cli_prefix + f"Started with {len(env)} envvars:\n", fg="bright_cyan", bold=True)
+            + click.style(cmd, fg="cyan"),
+            err=True,
+        )
+
         ret: Optional[int] = None
         while predicate() and ret is None:
             ret = ch.poll(_POLL_INTERVAL)
         if ret is None:
-            _log_execution_point(loc, "stopping")
+            _log_execution(loc, "stopping")
             ch.initiate_stopping_sequence(kill_timeout * 0.5, kill_timeout)
         while ret is None:
             ret = ch.poll(_POLL_INTERVAL)
-        _log_execution_point(loc, f"exit code: {ret}")
+
+        elapsed = time.monotonic() - started_at
+        _log_execution(loc, f"exit pid={ch.pid:07d} status={ret} elapsed={elapsed:.1f}")
+        if ret != 0:
+            click.secho(cli_prefix + f"Nonzero exit status: {ret}", fg="bright_yellow", err=True)
         return ret
     finally:
         ch.ensure_dead()  # Terminate process in the event of an exception.
 
 
-def _log_execution_point(loc: str, text: str) -> None:
-    _logger.info("@%s: %s", loc, text)
+def _log_execution(loc: str, text: str) -> None:
+    _logger.info("At %s: %s", loc, text)
 
 
 class Child:
@@ -214,7 +227,6 @@ class Child:
             self._executor.submit(self._forward_line_by_line, self._proc.stdout, line_handler_stdout),
             self._executor.submit(self._forward_line_by_line, self._proc.stderr, line_handler_stderr),
         }
-        _logger.debug("%s: Executing %r with env %r", self, cmd, env)
 
     @property
     def pid(self) -> int:
@@ -233,7 +245,6 @@ class Child:
                 ret = self._proc.poll()
             if ret is not None:
                 self._return = ret
-                _logger.debug("%s: Exited with code %d", self, self._return)
         return self._return
 
     def initiate_stopping_sequence(self, escalate_after: float, give_up_after: float) -> None:
@@ -282,7 +293,6 @@ class Child:
                 time.sleep(Child._STREAM_POLL_INTERVAL)
         if buf.getvalue():
             line_handler(buf.getvalue())
-        _logger.debug("%s: Stream forwarder stopped")
 
     def __str__(self) -> str:
         return f"Child {self.pid:07d}"
@@ -323,7 +333,7 @@ def _load_yaml(yaml_file: Path) -> Dict[Any, Any]:
         return YAMLLoader().load(f.read())
 
 
-def _parse(ast: Dict[Any, Any], env: Dict[str, str]) -> Composition:
+def parse_composition(ast: Dict[Any, Any], env: Dict[str, str]) -> Composition:
     """
     Environment inheritance order (last entry takes precedence):
 
@@ -335,25 +345,27 @@ def _parse(ast: Dict[Any, Any], env: Dict[str, str]) -> Composition:
     if not isinstance(ast, dict):
         raise SchemaError(f"The composition shall be a dict, not {type(ast).__name__}")
 
-    extend = ast.pop("=import", None)
-    if extend is not None:
-        if not isinstance(extend, str):
-            raise SchemaError(f"Invalid extend specifier: {extend!r}")
-        ext = _parse(_load_yaml(Path(extend)), env.copy())
+    imp = ast.pop("import=", None)
+    if imp is not None:
+        if not isinstance(imp, str):
+            raise SchemaError(f"Invalid import specifier: {imp!r}")
+        ext = parse_composition(_load_yaml(Path(imp)), env.copy())
     else:
         ext = Composition(predicate=[], main=[], finalizer=[], env=env.copy())
     del env
 
-    for name, value in _flatten_registers({k: v for k, v in ast.items() if isinstance(k, str) and _NOT_ENV not in k}):
+    for name, value in _flatten_registers(
+        {k: v for k, v in ast.items() if isinstance(k, str) and _NOT_ENV not in k}
+    ).items():
         if _NAME_SEP in name:  # UAVCAN register.
             name, value = _canonicalize_register(name, value)
             name = name.upper().replace(_NAME_SEP, "_" * 2)
         ext.env[name] = str(value)
 
     out = Composition(
-        predicate=_parse_script(ast.pop("=?", []), ext.env) + ext.predicate,
-        main=_parse_script(ast.pop("=run", []), ext.env) + ext.main,
-        finalizer=_parse_script(ast.pop("=end", []), ext.env) + ext.finalizer,
+        predicate=parse_script(ast.pop("?=", []), ext.env) + ext.predicate,
+        main=parse_script(ast.pop("$=", []), ext.env) + ext.main,
+        finalizer=parse_script(ast.pop(".=", []), ext.env) + ext.finalizer,
         env=ext.env,
     )
     unattended = [k for k in ast if _NOT_ENV in k]
@@ -362,17 +374,17 @@ def _parse(ast: Dict[Any, Any], env: Dict[str, str]) -> Composition:
     return out
 
 
-def _parse_script(ast: Any, env: Dict[str, str]) -> List[Statement]:
+def parse_script(ast: Any, env: Dict[str, str]) -> List[Statement]:
     if isinstance(ast, list):
-        return [_parse_statement(x, env) for x in ast]
-    return [_parse_statement(ast, env)]
+        return [parse_statement(x, env) for x in ast]
+    return [parse_statement(ast, env)]
 
 
-def _parse_statement(ast: Any, env: Dict[str, str]) -> Statement:
+def parse_statement(ast: Any, env: Dict[str, str]) -> Statement:
     if isinstance(ast, str):
         return ShellStatement(ast)
     if isinstance(ast, dict):
-        return CompositionStatement(_parse(ast, env))
+        return CompositionStatement(parse_composition(ast, env))
     if ast is None:
         return JoinStatement()
     raise SchemaError("Statement shall be either: string (command to run), dict (nested schema), null (join)")
