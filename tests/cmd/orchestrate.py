@@ -51,7 +51,7 @@ def _unittest_execute_composition_a(capsys: pytest.CaptureFixture) -> None:
         "finalizer",
         "a.d.e: 1 2 3",
     ]
-    assert "\ntext value\n" in cap.err
+    assert "text value\n" in cap.err
 
     # Interrupted five seconds in.
     _ = capsys.readouterr()  # Drop the capture buffer.
@@ -63,4 +63,4 @@ def _unittest_execute_composition_a(capsys: pytest.CaptureFixture) -> None:
     assert cap.out.splitlines() == [
         "123 abc DEF",
     ]
-    assert "\ntext value\n" in cap.err
+    assert "text value\n" in cap.err

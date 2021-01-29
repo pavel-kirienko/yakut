@@ -42,7 +42,7 @@ def orchestrate(orchestration_file: str) -> None:
     def on_signal(s: int, _: Any) -> None:
         nonlocal sig_num
         sig_num = s
-        _logger.info("Orchestrator received signal %s %r, stopping", s, signal.strsignal(s))
+        _logger.info("Orchestrator received signal %s %r, stopping...", s, signal.strsignal(s))
 
     signal.signal(signal.SIGINT, on_signal)
     signal.signal(signal.SIGTERM, on_signal)
@@ -52,7 +52,7 @@ def orchestrate(orchestration_file: str) -> None:
         signal.signal(signal.SIGHUP, on_signal)
 
     try:
-        res = exec_file("", orchestration_file, {}, predicate=lambda: sig_num == 0)
+        res = exec_file(orchestration_file, {}, predicate=lambda: sig_num == 0)
     except SchemaError as ex:
         res = SCHEMA_ERROR_CODE
         _logger.exception(f"Orchestration file schema error: {ex}")

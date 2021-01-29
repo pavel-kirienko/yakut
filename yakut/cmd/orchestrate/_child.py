@@ -17,10 +17,22 @@ import logging
 _logger = logging.getLogger(__name__)
 
 
+SIGNAL_INTERRUPT = signal.SIGBREAK if sys.platform.startswith("win") else signal.SIGINT
+SIGNAL_TERMINATE = signal.SIGTERM
+SIGNAL_KILL = signal.SIGABRT if sys.platform.startswith("win") else signal.SIGKILL
+
+
 class Child:
+    """
+    Starts a child shell process and provides convenient non-blocking controls:
+
+    - :meth:`poll` for querying the status.
+    - :meth:`stop` for stopping with automatic escalation of the signal strength.
+    - The constructor accepts callbacks that are invoked for each line from stdout/stderr.
+    """
+
     _STREAM_BUFFER_SIZE = 1024 ** 2
     _STREAM_POLL_INTERVAL = 0.02
-    _STREAM_FINALIZATION_DELAY = 1.0
 
     def __init__(
         self,
@@ -29,6 +41,12 @@ class Child:
         line_handler_stdout: Callable[[str], None],
         line_handler_stderr: Callable[[str], None],
     ) -> None:
+        """
+        :param cmd: Shell command to execute. Execution starts immediately.
+        :param env: Additional environment variables.
+        :param line_handler_stdout: Called from a ***separate worker thread*** when the child emits a line into stdout.
+        :param line_handler_stderr: Ditto, but for stderr.
+        """
         self._return: Optional[int] = None
         self._signaling_schedule: List[Tuple[float, Callable[[], None]]] = []
         self._executor = ThreadPoolExecutor(max_workers=999)
@@ -51,9 +69,16 @@ class Child:
 
     @property
     def pid(self) -> int:
+        """
+        The process-ID of the child. This value retains validity even after the child is terminated.
+        """
         return self._proc.pid
 
     def poll(self, timeout: float) -> Optional[int]:
+        """
+        :param timeout: Block for this many seconds, at most.
+        :return: None if still running, exit code if finished (idempotent).
+        """
         if self._futures:
             done, self._futures = wait(self._futures, timeout=0)
             for f in done:  # Propagate exceptions, if any, from the background tasks.
@@ -75,27 +100,41 @@ class Child:
 
         return self._return
 
-    def initiate_stopping_sequence(self, escalate_after: float, give_up_after: float) -> None:
+    def stop(self, escalate_after: float, give_up_after: float) -> None:
+        """
+        Send a SIGINT/SIGBREAK to the process and schedule to check if it's dead later.
+
+        :param escalate_after: If the process is still alive this many seconds after the initial termination signal,
+            send a SIGTERM.
+
+        :param give_up_after: Ditto, but instead of SIGTERM send SIGKILL (on Windows use SIGABRT instead)
+            and disown the child immediately without waiting around. This is logged as error.
+        """
         if self._return is not None or self._proc.poll() is not None:
             return
         give_up_after = max(give_up_after, escalate_after)
         _logger.debug(
-            "%s: Interrupting. Escalation timeout: %.1f, give-up timeout: %.1f", self, escalate_after, give_up_after
+            "%s: Stopping using signal %r. Escalation timeout: %.1f, give-up timeout: %.1f",
+            self,
+            signal.strsignal(SIGNAL_INTERRUPT),
+            escalate_after,
+            give_up_after,
         )
         # FIXME: on Windows, killing the shell process does not terminate its children.
         # TODO: use psutil to manually hunt down each child and kill them off one by one.
-        self._proc.send_signal(signal.SIGBREAK if sys.platform.startswith("win") else signal.SIGINT)
+        self._proc.send_signal(SIGNAL_INTERRUPT)
 
         def terminate() -> None:
-            _logger.warning("%s: Interrupt signal had no effect, trying to terminate", self)
-            self._proc.send_signal(signal.SIGTERM)
+            _logger.warning("%s: The child is still alive. Escalating to %r", self, signal.strsignal(SIGNAL_TERMINATE))
+            self._proc.send_signal(SIGNAL_TERMINATE)
 
         def kill() -> None:
-            sig = signal.SIGABRT if sys.platform.startswith("win") else signal.SIGKILL
-            if self._return is None:
-                self._return = -sig
-            _logger.error("%s: Termination signal had no effect, giving up by killing and abandoning the child", self)
-            self._proc.send_signal(sig)
+            _logger.error(
+                "%s: The child is still alive. Escalating to %r and detaching. No further attempts will be made!",
+                self,
+                signal.strsignal(SIGNAL_KILL),
+            )
+            self.kill()
 
         now = time.monotonic()
         self._signaling_schedule = [
@@ -103,8 +142,14 @@ class Child:
             (now + give_up_after, kill),
         ]
 
-    def ensure_dead(self) -> None:
-        self._proc.kill()
+    def kill(self) -> None:
+        """
+        This is intended for abnormal termination of the owner of this instance.
+        Simply kills the child and ceases all related activities.
+        """
+        if self._return is None:
+            self._return = -SIGNAL_KILL
+        self._proc.send_signal(SIGNAL_KILL)
 
     def _forward_line_by_line(self, stream: io.TextIOWrapper, line_handler: Callable[[str], None]) -> None:
         buf = io.StringIO()
@@ -121,11 +166,8 @@ class Child:
 
         while self._return is None and self._proc.poll() is None:
             once()
-        # Hang around for a short while to make sure that any delayed data is also forwarded.
-        for _ in range(int(Child._STREAM_FINALIZATION_DELAY / Child._STREAM_POLL_INTERVAL)):
-            once()
-        # Flush unterminated line.
-        if buf.getvalue():
+        once()
+        if buf.getvalue():  # Flush the last unterminated line, if any.
             line_handler(buf.getvalue())
 
     def __str__(self) -> str:
@@ -158,7 +200,7 @@ def _unittest_child(caplog: object) -> None:
     with caplog.at_level(logging.CRITICAL):
         c = Child(f"python -c '{py}'", {}, line_handler_stdout=ln_out.append, line_handler_stderr=ln_err.append)
         assert c.poll(0.1) is None
-        c.initiate_stopping_sequence(1.0, 2.0)
+        c.stop(1.0, 2.0)
         assert c.poll(1.0) is None
         for _ in range(50):
             res = c.poll(0.1)
@@ -174,7 +216,7 @@ def _unittest_child(caplog: object) -> None:
         line_handler_stderr=ln_err.append,
     )
     assert c.poll(0.1) is None
-    c.ensure_dead()
+    c.kill()
     res = c.poll(1.0)
     assert res is not None
     assert res < 0  # Killed
@@ -188,5 +230,6 @@ def _unittest_child(caplog: object) -> None:
         line_handler_stderr=ln_err.append,
     )
     assert 0 == c.poll(1.0)
+    time.sleep(2.0)
     assert ln_out == ["DEF", "GHI"]
     assert ln_err == ["ABC"]

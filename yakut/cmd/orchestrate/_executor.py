@@ -5,12 +5,12 @@
 from __future__ import annotations
 import sys
 import time
+import itertools
 from concurrent.futures import Future, ThreadPoolExecutor, wait
 from typing import Dict, List, Optional, Callable, Any
 from functools import partial
 from pathlib import Path
 import logging
-import click
 from ._child import Child
 from ._schema import Composition, load_composition, parse
 from ._schema import Statement, ShellStatement, CompositionStatement, JoinStatement
@@ -20,16 +20,14 @@ FlagDelegate = Callable[[], bool]
 
 _POLL_INTERVAL = 0.05
 
-_logger = logging.getLogger(__name__)
-
 
 def exec_file(file: str, env: Dict[str, str], *, predicate: FlagDelegate, stack: Optional[Stack] = None) -> int:
     # TODO: locate YAML in YAKUT_PATH
     pth = Path(file).resolve()
-    stack = stack.push(repr(str(pth)))
-    stack.trace(file)
+    stack = (stack or Stack()).push(pth)
+    stack.log_debug(f"Executing file: {pth}")
     comp = load_composition(parse(pth), env)
-    _logger.debug("Parsed file %s using external env keys %s", pth, list(env))
+    stack.log_debug(f"Loaded composition:", str(comp))
     return exec_composition(comp, predicate=predicate, stack=stack)
 
 
@@ -39,7 +37,7 @@ def exec_composition(comp: Composition, *, predicate: FlagDelegate, stack: Stack
         started_at = time.monotonic()
         res = exec_script(scr, comp.env, kill_timeout=comp.kill_timeout, predicate=inner_predicate, stack=inner_stack)
         elapsed = time.monotonic() - started_at
-        inner_stack.trace(f"script exit status={res} elapsed={elapsed:.1f}")
+        inner_stack.log_debug(f"Script exit status {res} in {elapsed:.1f} sec")
         return res
 
     def finalize() -> int:
@@ -101,7 +99,7 @@ def exec_script(
                 pending.append(launch_composition(stmt_stack, stmt.comp))
             elif isinstance(stmt, JoinStatement):
                 num_pending = sum(1 for x in pending if not x.done())
-                stmt_stack.trace(f"waiting on {num_pending} statements")
+                stmt_stack.log_debug(f"Waiting for {num_pending} pending statements to join")
                 if pending:
                     wait(pending)
             else:
@@ -128,53 +126,54 @@ def exec_shell(cmd: str, env: Dict[str, str], *, kill_timeout: float, predicate:
         line_handler_stdout=partial(print),
         line_handler_stderr=partial(print, file=sys.stderr),
     )
-    prefix = f"{ch.pid:08d}: "
+    prefix = f"PID={ch.pid:08d} "
     try:
-        stack.trace(f"shell pid={ch.pid:08d} env={env} cmd=\\\n{cmd}")
         longest_env = max(map(len, env.keys()))
-        echo(
-            "\n".join(
-                [
-                    style_env("\n".join(f"{prefix}{k.ljust(longest_env)} = {v!r}" for k, v in env.items())),
-                    style_cmd("\n".join(f"{prefix}{ln}" for ln in cmd.splitlines())),
-                ]
+        stack.log_info(
+            *itertools.chain(
+                (f"{prefix}EXECUTING WITH ENVIRONMENT VARIABLES:",),
+                ((k.ljust(longest_env) + " = " + repr(v)) for k, v in env.items()),
+                cmd.splitlines(),
             ),
-            err=True,
         )
         ret: Optional[int] = None
         while predicate() and ret is None:
             ret = ch.poll(_POLL_INTERVAL)
         if ret is None:
-            stack.trace("stopping")
-            echo(style_warn(f"{prefix}[stopping]"))
-            ch.initiate_stopping_sequence(kill_timeout * 0.75, kill_timeout)
+            stack.log_warning(f"{prefix}Stopping manually")
+            ch.stop(kill_timeout * 0.75, kill_timeout)
         while ret is None:
             ret = ch.poll(_POLL_INTERVAL)
 
         elapsed = time.monotonic() - started_at
-        stack.trace(f"exit pid={ch.pid:08d} status={ret} elapsed={elapsed:.1f}")
-        if ret != 0:
-            echo(style_warn(f"{prefix}[exit status {ret}]"))
+        stack.log_info(f"{prefix}Exit status {ret} in {elapsed:.1f} sec")
         return ret
     finally:
-        ch.ensure_dead()  # Terminate process in the event of an exception.
+        ch.kill()
 
 
 class Stack:
-    def __init__(self, path: Optional[List[str]] = None) -> None:
-        self._path = path if path else []
+    def __init__(self, path: Optional[List[str]] = None, logger: Optional[logging.Logger] = None) -> None:
+        from . import __name__ as nm
+
+        self._path = path or []
+        self._logger = logger or logging.getLogger(nm)
 
     def push(self, node: Any) -> Stack:
-        return Stack(self._path + [str(node)])
+        return Stack(self._path + [str(node)], self._logger)
 
-    def trace(self, text: str) -> None:
-        _logger.info("At %s: %s", str(self), text)
+    def log(self, level: int, *lines: str) -> None:
+        if self._logger.isEnabledFor(level):
+            self._logger.log(level, str(self) + "\n" + "\n".join(lines))
+
+    def log_debug(self, *lines: str) -> None:
+        return self.log(logging.DEBUG, *lines)
+
+    def log_info(self, *lines: str) -> None:
+        return self.log(logging.INFO, *lines)
+
+    def log_warning(self, *lines: str) -> None:
+        return self.log(logging.WARNING, *lines)
 
     def __str__(self) -> str:
-        return "/" + "/".join(self._path)
-
-
-echo = partial(click.echo, err=True)
-style_warn = partial(click.style, fg="yellow")
-style_env = partial(click.style, fg="cyan")
-style_cmd = partial(click.style, fg="magenta")
+        return " ".join(self._path)
