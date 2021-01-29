@@ -17,7 +17,9 @@ $=:
 -
 - echo finalizer
 - $=:
-  - 'echo "a.d.e: $A__D__E__NATURAL8"'
+  - |
+    sleep 0.5                           # Ensure deterministic ordering.
+    echo "a.d.e: $A__D__E__NATURAL8"    # This is a multi-line statement.
   - ?=: []
 .=: exit 123
 A: 123
@@ -36,9 +38,9 @@ def _unittest_execute_composition_a(capsys: pytest.CaptureFixture) -> None:
     ast = YAMLLoader().load(_TEST_A)
     comp = load_composition(ast, {"C": "DEF"})
     print(comp)
-    _ = capsys.readouterr()
 
     # Regular test, runs until completion.
+    _ = capsys.readouterr()  # Drop the capture buffer.
     started_at = time.monotonic()
     assert 123 == exec_composition(comp, predicate=lambda: True, stack=Stack())
     elapsed = time.monotonic() - started_at
@@ -52,14 +54,13 @@ def _unittest_execute_composition_a(capsys: pytest.CaptureFixture) -> None:
     assert "\ntext value\n" in cap.err
 
     # Interrupted five seconds in.
+    _ = capsys.readouterr()  # Drop the capture buffer.
     started_at = time.monotonic()
-    print("started_at:", started_at)
-    assert 123 == exec_composition(comp, predicate=lambda: time.monotonic() - started_at < 5.0, stack=Stack())
+    assert 0 != exec_composition(comp, predicate=lambda: time.monotonic() - started_at < 5.0, stack=Stack())
     elapsed = time.monotonic() - started_at
     assert 5 <= elapsed <= 9, "Interruption is not handled correctly."
     cap = capsys.readouterr()
     assert cap.out.splitlines() == [
         "123 abc DEF",
-        "finalizer",
     ]
     assert "\ntext value\n" in cap.err

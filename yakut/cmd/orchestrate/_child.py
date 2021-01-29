@@ -8,6 +8,7 @@ import io
 import sys
 import time
 import signal
+from concurrent.futures import ThreadPoolExecutor, wait
 from subprocess import Popen, PIPE, DEVNULL
 from typing import Dict, Optional, Callable, List, Tuple
 import logging
@@ -18,6 +19,8 @@ _logger = logging.getLogger(__name__)
 
 class Child:
     _STREAM_BUFFER_SIZE = 1024 ** 2
+    _STREAM_POLL_INTERVAL = 0.02
+    _STREAM_FINALIZATION_DELAY = 1.0
 
     def __init__(
         self,
@@ -26,6 +29,9 @@ class Child:
         line_handler_stdout: Callable[[str], None],
         line_handler_stderr: Callable[[str], None],
     ) -> None:
+        self._return: Optional[int] = None
+        self._signaling_schedule: List[Tuple[float, Callable[[], None]]] = []
+        self._executor = ThreadPoolExecutor(max_workers=999)
         e = os.environ.copy()
         e.update(env)
         self._proc = Popen(
@@ -38,19 +44,22 @@ class Child:
             stdin=DEVNULL,
             bufsize=Child._STREAM_BUFFER_SIZE,
         )
-        self._return: Optional[int] = None
-        self._signaling_schedule: List[Tuple[float, Callable[[], None]]] = []
-        self._fwd_stdout = _StreamForwarder(line_handler_stdout)
-        self._fwd_stderr = _StreamForwarder(line_handler_stderr)
+        self._futures = {
+            self._executor.submit(self._forward_line_by_line, self._proc.stdout, line_handler_stdout),
+            self._executor.submit(self._forward_line_by_line, self._proc.stderr, line_handler_stderr),
+        }
 
     @property
     def pid(self) -> int:
         return self._proc.pid
 
     def poll(self, timeout: float) -> Optional[int]:
-        if self._return is None:
-            self._forward()
+        if self._futures:
+            done, self._futures = wait(self._futures, timeout=0)
+            for f in done:  # Propagate exceptions, if any, from the background tasks.
+                f.result()
 
+        if self._return is None:
             if self._signaling_schedule:
                 deadline, handler = self._signaling_schedule[0]
                 if time.monotonic() >= deadline:
@@ -63,10 +72,7 @@ class Child:
                 ret = self._proc.poll()
             if ret is not None:
                 self._return = ret
-                self._fwd_stdout.flush()
-                self._fwd_stderr.flush()
 
-        self._forward()
         return self._return
 
     def initiate_stopping_sequence(self, escalate_after: float, give_up_after: float) -> None:
@@ -100,39 +106,30 @@ class Child:
     def ensure_dead(self) -> None:
         self._proc.kill()
 
-    def _forward(self) -> None:
-        s = self._proc.stdout
-        assert isinstance(s, io.TextIOWrapper)
-        self._fwd_stdout.poll(s)
+    def _forward_line_by_line(self, stream: io.TextIOWrapper, line_handler: Callable[[str], None]) -> None:
+        buf = io.StringIO()
 
-        s = self._proc.stderr
-        assert isinstance(s, io.TextIOWrapper)
-        self._fwd_stderr.poll(s)
+        def once() -> None:
+            nonlocal buf
+            time.sleep(Child._STREAM_POLL_INTERVAL)
+            for ch in stream.read():
+                if ch == "\n":
+                    line_handler(buf.getvalue())
+                    buf = io.StringIO()
+                else:
+                    buf.write(ch)
+
+        while self._return is None and self._proc.poll() is None:
+            once()
+        # Hang around for a short while to make sure that any delayed data is also forwarded.
+        for _ in range(int(Child._STREAM_FINALIZATION_DELAY / Child._STREAM_POLL_INTERVAL)):
+            once()
+        # Flush unterminated line.
+        if buf.getvalue():
+            line_handler(buf.getvalue())
 
     def __str__(self) -> str:
         return f"Child {self.pid:08d}"
-
-
-class _StreamForwarder:
-    def __init__(self, line_handler: Callable[[str], None]) -> None:
-        self._line_handler = line_handler
-        self._buf = io.StringIO()
-
-    def poll(self, stream: io.TextIOWrapper) -> None:
-        while True:
-            ch = stream.read(1)
-            if not ch:
-                break
-            if ch == "\n":
-                self._line_handler(self._buf.getvalue())
-                self._buf = io.StringIO()
-            else:
-                self._buf.write(ch)
-
-    def flush(self) -> None:
-        if self._buf.getvalue():
-            self._line_handler(self._buf.getvalue())
-        self._buf = io.StringIO()
 
 
 def _unittest_child(caplog: object) -> None:
