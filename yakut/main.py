@@ -6,6 +6,7 @@ import os
 import sys
 import typing
 import logging
+from pathlib import Path
 import click
 import yakut
 from yakut.param.transport import transport_factory_option, TransportFactory, Transport
@@ -21,16 +22,22 @@ logging.basicConfig(format=_LOG_FORMAT)  # Using the default log level; it will 
 class Purser:
     def __init__(
         self,
+        paths: typing.Iterable[typing.Union[str, Path]],
         formatter_factory: FormatterFactory,
         transport_factory: TransportFactory,
         node_factory: NodeFactory,
     ) -> None:
+        self._paths = list(Path(x) for x in paths)
         self._f_formatter = formatter_factory
         self._f_transport = transport_factory
         self._f_node = node_factory
 
         self._transport: typing.Optional[Transport] = None
         self._node: typing.Optional[object] = None
+
+    @property
+    def paths(self) -> typing.List[Path]:
+        return list(self._paths)
 
     def make_formatter(self) -> Formatter:
         return self._f_formatter()
@@ -150,6 +157,7 @@ def main(
         sys.path.append(str(p))
 
     ctx.obj = Purser(
+        paths=path,
         formatter_factory=formatter_factory,
         transport_factory=transport_factory,
         node_factory=node_factory,

@@ -6,8 +6,9 @@ from __future__ import annotations
 import sys
 import time
 import itertools
+import dataclasses
 from concurrent.futures import Future, ThreadPoolExecutor, wait
-from typing import Dict, List, Optional, Callable, Any
+from typing import Dict, List, Optional, Callable, Any, Sequence
 from functools import partial
 from pathlib import Path
 import logging
@@ -18,24 +19,43 @@ from ._schema import Statement, ShellStatement, CompositionStatement, JoinStatem
 
 FlagDelegate = Callable[[], bool]
 
-_POLL_INTERVAL = 0.05
+
+class ExecutionError(ValueError):
+    pass
 
 
-def exec_file(file: str, env: Dict[str, str], *, predicate: FlagDelegate, stack: Optional[Stack] = None) -> int:
-    # TODO: locate YAML in YAKUT_PATH
+@dataclasses.dataclass(frozen=True)
+class Context:
+    lookup_paths: Sequence[Path]
+    poll_interval: float = 0.05
+
+
+def exec_file(
+    ctx: Context, file: str, env: Dict[str, str], *, predicate: FlagDelegate, stack: Optional[Stack] = None
+) -> int:
     pth = Path(file).resolve()
+    if not pth.is_file():
+        for p in ctx.lookup_paths:
+            pth = (p / file).resolve()
+            if pth.is_file():
+                break
+        else:
+            raise ExecutionError(f"Cannot locate file to execute: {file!r}")
+
     stack = (stack or Stack()).push(pth)
     stack.log_debug(f"Executing file: {pth}")
     comp = load_composition(parse(pth), env)
     stack.log_debug(f"Loaded composition:", str(comp))
-    return exec_composition(comp, predicate=predicate, stack=stack)
+    return exec_composition(ctx, comp, predicate=predicate, stack=stack)
 
 
-def exec_composition(comp: Composition, *, predicate: FlagDelegate, stack: Stack) -> int:
+def exec_composition(ctx: Context, comp: Composition, *, predicate: FlagDelegate, stack: Stack) -> int:
     def do(node: str, scr: List[Statement], inner_predicate: FlagDelegate) -> int:
         inner_stack = stack.push(node)
         started_at = time.monotonic()
-        res = exec_script(scr, comp.env, kill_timeout=comp.kill_timeout, predicate=inner_predicate, stack=inner_stack)
+        res = exec_script(
+            ctx, scr, comp.env, kill_timeout=comp.kill_timeout, predicate=inner_predicate, stack=inner_stack
+        )
         elapsed = time.monotonic() - started_at
         inner_stack.log_debug(f"Script exit status {res} in {elapsed:.1f} sec")
         return res
@@ -55,7 +75,13 @@ def exec_composition(comp: Composition, *, predicate: FlagDelegate, stack: Stack
 
 
 def exec_script(
-    scr: List[Statement], env: Dict[str, str], *, kill_timeout: float, predicate: FlagDelegate, stack: Stack
+    ctx: Context,
+    scr: List[Statement],
+    env: Dict[str, str],
+    *,
+    kill_timeout: float,
+    predicate: FlagDelegate,
+    stack: Stack,
 ) -> int:
     """
     :return: Exit code of the first statement to fail. Zero if all have succeeded.
@@ -77,13 +103,15 @@ def exec_script(
     def launch_shell(inner_stack: Stack, cmd: str) -> Future[None]:
         return executor.submit(
             lambda: accept_result(
-                exec_shell(cmd, env.copy(), kill_timeout=kill_timeout, predicate=inner_predicate, stack=inner_stack)
+                exec_shell(
+                    ctx, cmd, env.copy(), kill_timeout=kill_timeout, predicate=inner_predicate, stack=inner_stack
+                )
             )
         )
 
     def launch_composition(inner_stack: Stack, comp: Composition) -> Future[None]:
         return executor.submit(
-            lambda: accept_result(exec_composition(comp, predicate=inner_predicate, stack=inner_stack))
+            lambda: accept_result(exec_composition(ctx, comp, predicate=inner_predicate, stack=inner_stack))
         )
 
     executor = ThreadPoolExecutor(max_workers=len(scr))
@@ -118,7 +146,9 @@ def exec_script(
         raise
 
 
-def exec_shell(cmd: str, env: Dict[str, str], *, kill_timeout: float, predicate: FlagDelegate, stack: Stack) -> int:
+def exec_shell(
+    ctx: Context, cmd: str, env: Dict[str, str], *, kill_timeout: float, predicate: FlagDelegate, stack: Stack
+) -> int:
     started_at = time.monotonic()
     ch = Child(
         cmd,
@@ -138,12 +168,12 @@ def exec_shell(cmd: str, env: Dict[str, str], *, kill_timeout: float, predicate:
         )
         ret: Optional[int] = None
         while predicate() and ret is None:
-            ret = ch.poll(_POLL_INTERVAL)
+            ret = ch.poll(ctx.poll_interval)
         if ret is None:
             stack.log_warning(f"{prefix}Stopping manually")
             ch.stop(kill_timeout * 0.75, kill_timeout)
         while ret is None:
-            ret = ch.poll(_POLL_INTERVAL)
+            ret = ch.poll(ctx.poll_interval)
 
         elapsed = time.monotonic() - started_at
         stack.log_info(f"{prefix}Exit status {ret} in {elapsed:.1f} sec")
@@ -160,7 +190,12 @@ class Stack:
         self._logger = logger or logging.getLogger(nm)
 
     def push(self, node: Any) -> Stack:
-        return Stack(self._path + [str(node)], self._logger)
+        if isinstance(node, Path):
+            node = repr(str(node))
+        else:
+            node = str(node)
+        assert isinstance(node, str)
+        return Stack(self._path + [node], self._logger)
 
     def log(self, level: int, *lines: str) -> None:
         if self._logger.isEnabledFor(level):

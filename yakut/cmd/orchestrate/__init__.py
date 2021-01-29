@@ -15,14 +15,17 @@ from ._schema import Composition as Composition
 from ._schema import load_composition as load_composition
 from ._schema import parse as parse
 
+from ._executor import ExecutionError as ExecutionError
+from ._executor import Context as Context
 from ._executor import Stack as Stack
 from ._executor import exec_file as exec_file
 from ._executor import exec_composition as exec_composition
 
 
+EXECUTION_ERROR_CODE = 124
 SCHEMA_ERROR_CODE = 125
 """
-125 is the maximum exit code that can be safely used in a POSIX system. It is used for reporting invalid spec files.
+125 is the maximum exit code that can be safely used in a POSIX system.
 """
 
 
@@ -31,11 +34,10 @@ _logger = logging.getLogger(__name__)
 
 @yakut.subcommand()
 @click.argument("orchestration_file", type=str)
-def orchestrate(orchestration_file: str) -> None:
+@yakut.pass_purser
+def orchestrate(purser: yakut.Purser, orchestration_file: str) -> None:
     """
     Execute an orchestration file.
-
-    The finalization section is intentionally shielded from all signals.
     """
     sig_num = 0
 
@@ -52,9 +54,13 @@ def orchestrate(orchestration_file: str) -> None:
         signal.signal(signal.SIGHUP, on_signal)
 
     try:
-        res = exec_file(orchestration_file, {}, predicate=lambda: sig_num == 0)
+        ctx = Context(lookup_paths=purser.paths)
+        res = exec_file(ctx, orchestration_file, {}, predicate=lambda: sig_num == 0)
     except SchemaError as ex:
         res = SCHEMA_ERROR_CODE
         _logger.exception(f"Orchestration file schema error: {ex}")
+    except ExecutionError as ex:
+        res = EXECUTION_ERROR_CODE
+        _logger.exception(f"Orchestration execution error: {ex}")
 
     exit(res if res != 0 else -sig_num)
