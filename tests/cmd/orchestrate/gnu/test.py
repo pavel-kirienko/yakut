@@ -14,7 +14,7 @@ if sys.platform.startswith("win"):  # pragma: no cover
     pytest.skip("These are GNU/Linux-only tests", allow_module_level=True)
 
 
-def _unittest_a(capsys: pytest.CaptureFixture) -> None:
+def _unittest_a(capsys: pytest.CaptureFixture[str]) -> None:
     ast = load_ast((Path(__file__).parent / "a.orc.yaml").read_text())
     comp = load_composition(ast, {"C": "DEF", "D": "this variable will be unset"})
     print(comp)
@@ -52,7 +52,7 @@ def _unittest_a(capsys: pytest.CaptureFixture) -> None:
     assert ErrorCode.FILE_ERROR == exec_composition(ctx, comp, predicate=lambda: True, stack=Stack())
 
 
-def _unittest_b(capsys: pytest.CaptureFixture) -> None:
+def _unittest_b(capsys: pytest.CaptureFixture[str]) -> None:
     ctx = Context(lookup_paths=[ROOT_DIR, Path(__file__).parent])
     _ = capsys.readouterr()
     assert 0 == exec_file(ctx, "b.orc.yaml", env={"PROCEED_B": "1"}, predicate=lambda: True)
@@ -66,7 +66,7 @@ def _unittest_b(capsys: pytest.CaptureFixture) -> None:
     ]
 
     _ = capsys.readouterr()
-    assert 0 == exec_file(ctx, (Path(__file__).parent / "b.orc.yaml").absolute(), env={}, predicate=lambda: True)
+    assert 0 == exec_file(ctx, str((Path(__file__).parent / "b.orc.yaml").absolute()), env={}, predicate=lambda: True)
     cap = capsys.readouterr()
     assert cap.out.splitlines() == [
         "finalizer b",

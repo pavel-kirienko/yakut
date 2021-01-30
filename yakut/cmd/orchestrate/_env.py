@@ -3,23 +3,34 @@
 # Author: Pavel Kirienko <pavel@uavcan.org>
 
 from __future__ import annotations
-from functools import lru_cache
-from typing import Dict, List, Tuple, Any
+from typing import Dict, Tuple, Any
 
 
 NAME_SEP = "."
 ITEM_SEP = " "
 
+REGISTER_VALUE_OPTION_NAMES = [
+    "empty",
+    "string",
+    "unstructured",
+    "bit",
+    "integer64",
+    "integer32",
+    "integer16",
+    "integer8",
+    "natural32",
+    "natural64",
+    "natural16",
+    "natural8",
+    "real64",
+    "real32",
+    "real16",
+]
+"""Field names from uavcan.register.Value.1."""
+
 
 class EnvironmentVariableError(ValueError):
     pass
-
-
-@lru_cache(None)
-def _get_register_value_option_names() -> List[str]:
-    from uavcan.register import Value_1_0 as Value
-
-    return [x for x in dir(Value) if not x.startswith("_")]
 
 
 def canonicalize_register(name: str, value: Any) -> Tuple[str, str]:
@@ -57,7 +68,8 @@ def canonicalize_register(name: str, value: Any) -> Tuple[str, str]:
     ...
     EnvironmentVariableError: ...
     """
-    for val_opt_name in _get_register_value_option_names():
+    # pylint: disable=too-many-return-statements,too-many-branches,multiple-statements
+    for val_opt_name in REGISTER_VALUE_OPTION_NAMES:
         suffix = NAME_SEP + val_opt_name
         if name.endswith(suffix):
             if val_opt_name == "empty":
@@ -85,7 +97,7 @@ def canonicalize_register(name: str, value: Any) -> Tuple[str, str]:
             assert False, f"Internal error: unhandled value option: {val_opt_name}"
 
     def convert(ty: str) -> Tuple[str, str]:
-        assert ty in _get_register_value_option_names()
+        assert ty in REGISTER_VALUE_OPTION_NAMES
         return canonicalize_register(name + NAME_SEP + ty, value)
 
     # Type not specified. Perform auto-detection.

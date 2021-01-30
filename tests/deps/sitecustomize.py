@@ -28,7 +28,6 @@ def setup_coverage() -> None:
         # Coverage configuration; see https://coverage.readthedocs.io/en/coverage-4.2/subprocess.html
         os.environ["COVERAGE_PROCESS_START"] = str(SETUP_CFG)
         coverage.process_startup()
-        print(f"Tracking coverage of {sys.argv}", file=sys.stderr)
 
 
 if not detect_debugger():

@@ -68,7 +68,7 @@ def exec_file(
     stack.log_debug(f"Executing file {file!r} found at: {pth}")
     try:
         source_text = pth.read_text()
-    except Exception as ex:
+    except Exception as ex:  # pylint: disable=broad-except
         stack.log_warning(f"Cannot read file {pth}: {ex}")
         return int(ErrorCode.FILE_ERROR)
 
@@ -240,7 +240,7 @@ class Stack:
 
     def log(self, level: int, *lines: str) -> None:
         if self._logger.isEnabledFor(level):
-            self._logger.log(level, f"Call stack: {self}\n" + "\n".join(lines))
+            self._logger.log(level, "Call stack: %s\n%s", self, "\n".join(lines))
 
     def log_debug(self, *lines: str) -> None:
         return self.log(logging.DEBUG, *lines)

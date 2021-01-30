@@ -48,4 +48,4 @@ def orchestrate(purser: yakut.Purser, orchestration_file: str) -> None:
     ctx = Context(lookup_paths=purser.paths)
     res = exec_file(ctx, orchestration_file, {}, predicate=lambda: sig_num == 0)
 
-    exit(res if res != 0 else -sig_num)
+    sys.exit(res if res != 0 else -sig_num)

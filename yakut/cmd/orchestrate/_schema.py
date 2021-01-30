@@ -53,7 +53,7 @@ def load_ast(text: str) -> Any:
     try:
         return YAMLLoader().load(text)
     except Exception as ex:
-        raise SchemaError(f"Syntax error: {ex}")
+        raise SchemaError(f"Syntax error: {ex}") from ex
 
 
 def load_composition(ast: Any, env: Dict[str, str]) -> Composition:

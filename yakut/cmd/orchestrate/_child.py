@@ -17,9 +17,14 @@ import logging
 _logger = logging.getLogger(__name__)
 
 
-SIGNAL_INTERRUPT = signal.SIGBREAK if sys.platform.startswith("win") else signal.SIGINT
-SIGNAL_TERMINATE = signal.SIGTERM
-SIGNAL_KILL = signal.SIGABRT if sys.platform.startswith("win") else signal.SIGKILL
+if sys.platform.startswith("win"):
+    SIGNAL_INTERRUPT = signal.SIGBREAK
+    SIGNAL_TERMINATE = signal.SIGTERM
+    SIGNAL_KILL = signal.SIGABRT
+else:
+    SIGNAL_INTERRUPT = signal.SIGINT
+    SIGNAL_TERMINATE = signal.SIGTERM
+    SIGNAL_KILL = signal.SIGKILL
 
 
 class Child:
