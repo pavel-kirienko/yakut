@@ -1,0 +1,8 @@
+$=:
+  ?=: test -n "$PROCEED_B"
+  $=: echo main b
+  delegate=: tests/cmd/orchestrate/c.orc.yaml
+.=:
+- echo finalizer b $PROCEED_B
+- sleep 1
+FOO: 123

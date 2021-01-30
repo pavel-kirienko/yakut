@@ -1,0 +1,14 @@
+$=:
+  - echo $FOO
+  - ?=:  # Since this is an optional block, its failure will be ignored.
+      delegate=: nonexistent.orc.yaml
+      .=: fgsfds
+  -
+  - $=: echo $FOO
+    FOO: 456
+  -
+  - delegate=: tests/cmd/orchestrate/b.orc.yaml  # Recursive inclusion but with the gate flag cleared.
+    PROCEED_B:
+.=:
+  ?=: test -n "$PLEASE_FAIL"
+  $=: exit 42

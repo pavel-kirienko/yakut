@@ -166,7 +166,8 @@ class Child:
 
         while self._return is None and self._proc.poll() is None:
             once()
-        once()
+        for _ in range(3):
+            once()
         if buf.getvalue():  # Flush the last unterminated line, if any.
             line_handler(buf.getvalue())
 

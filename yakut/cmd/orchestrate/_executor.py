@@ -5,6 +5,7 @@
 from __future__ import annotations
 import sys
 import time
+import enum
 import itertools
 import dataclasses
 from concurrent.futures import Future, ThreadPoolExecutor, wait
@@ -13,15 +14,21 @@ from functools import partial
 from pathlib import Path
 import logging
 from ._child import Child
-from ._schema import Composition, load_composition, parse
+from ._schema import Composition, load_composition, load_ast, SchemaError
 from ._schema import Statement, ShellStatement, CompositionStatement, JoinStatement
 
 
 FlagDelegate = Callable[[], bool]
 
 
-class ExecutionError(ValueError):
-    pass
+class ErrorCode(enum.IntEnum):
+    """
+    POSIX systems can safely use exit codes in [0, 125]. We use the upper range for own errors.
+    https://unix.stackexchange.com/questions/418784/what-is-the-min-and-max-values-of-exit-codes-in-linux
+    """
+
+    SCHEMA_ERROR = 125
+    FILE_ERROR = 124
 
 
 @dataclasses.dataclass(frozen=True)
@@ -30,53 +37,87 @@ class Context:
     poll_interval: float = 0.05
 
 
+def locate(ctx: Context, file: str) -> Optional[Path]:
+    p = Path(file)
+    if p.is_absolute():
+        if p.exists():
+            return p
+    else:
+        for p in ctx.lookup_paths:
+            p = (p / file).resolve()
+            if p.exists():
+                return p
+    return None
+
+
 def exec_file(
     ctx: Context, file: str, env: Dict[str, str], *, predicate: FlagDelegate, stack: Optional[Stack] = None
 ) -> int:
-    pth = Path(file).resolve()
-    if not pth.is_file():
-        for p in ctx.lookup_paths:
-            pth = (p / file).resolve()
-            if pth.is_file():
-                break
-        else:
-            raise ExecutionError(f"Cannot locate file to execute: {file!r}")
+    """
+    This function never raises exceptions in response to invalid syntax or a programmable error.
+    Instead, it uses exit codes to report failures, to unify behavior with invoked processes.
+    An exception may only indicate a bug in the implementation or an internal contract violation.
+    """
+    stack = stack or Stack()
+    stack.log_debug(f"Locating file: {file!r} in:", *map(str, ctx.lookup_paths))
+    pth = locate(ctx, file)
+    if not pth:
+        stack.log_warning(f"Cannot locate file {file!r} in:", *map(str, ctx.lookup_paths))
+        return int(ErrorCode.FILE_ERROR)
 
-    stack = (stack or Stack()).push(pth)
-    stack.log_debug(f"Executing file: {pth}")
-    comp = load_composition(parse(pth), env)
+    stack.log_debug(f"Executing file {file!r} found at: {pth}")
+    try:
+        source_text = pth.read_text()
+    except Exception as ex:
+        stack.log_warning(f"Cannot read file {pth}: {ex}")
+        return int(ErrorCode.FILE_ERROR)
+
+    try:
+        comp = load_composition(load_ast(source_text), env)
+    except SchemaError as ex:
+        stack.log_warning(f"Cannot load file {pth}: {ex}")
+        return int(ErrorCode.SCHEMA_ERROR)
+
+    stack = stack.push(pth)
     stack.log_debug(f"Loaded composition:", str(comp))
     return exec_composition(ctx, comp, predicate=predicate, stack=stack)
 
 
 def exec_composition(ctx: Context, comp: Composition, *, predicate: FlagDelegate, stack: Stack) -> int:
-    def do(node: str, scr: List[Statement], inner_predicate: FlagDelegate) -> int:
+    def scr(node: str, scr: Sequence[Statement], inner_predicate: FlagDelegate) -> int:
         inner_stack = stack.push(node)
         started_at = time.monotonic()
         res = exec_script(
-            ctx, scr, comp.env, kill_timeout=comp.kill_timeout, predicate=inner_predicate, stack=inner_stack
+            ctx, scr, comp.env.copy(), kill_timeout=comp.kill_timeout, predicate=inner_predicate, stack=inner_stack
         )
         elapsed = time.monotonic() - started_at
         inner_stack.log_debug(f"Script exit status {res} in {elapsed:.1f} sec")
         return res
 
     def finalize() -> int:
-        return do(".", comp.finalizer, lambda: True)  # Finalizers cannot be interrupted.
+        return scr(".", comp.finalizer, lambda: True)  # Finalizers cannot be interrupted.
 
-    res = do("?", comp.predicate, predicate)
+    res = scr("?", comp.predicate, predicate)
     if res != 0:  # If any of the commands of the predicate fails, we simply skip the rest and report success.
         return 0
 
-    res = do("$", comp.main, predicate)
+    res = scr("$", comp.main, predicate)
     if res != 0:  # The return code of a composition is that of the first failed process.
         finalize()
         return res
+
+    if comp.delegate is not None:
+        res = exec_file(ctx, comp.delegate, comp.env.copy(), predicate=predicate, stack=stack.push("delegate"))
+        if res != 0:
+            finalize()
+            return res
+
     return finalize()
 
 
 def exec_script(
     ctx: Context,
-    scr: List[Statement],
+    scr: Sequence[Statement],
     env: Dict[str, str],
     *,
     kill_timeout: float,
@@ -199,7 +240,7 @@ class Stack:
 
     def log(self, level: int, *lines: str) -> None:
         if self._logger.isEnabledFor(level):
-            self._logger.log(level, str(self) + "\n" + "\n".join(lines))
+            self._logger.log(level, f"Call stack: {self}\n" + "\n".join(lines))
 
     def log_debug(self, *lines: str) -> None:
         return self.log(logging.DEBUG, *lines)

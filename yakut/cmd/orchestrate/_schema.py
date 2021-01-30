@@ -4,8 +4,7 @@
 
 from __future__ import annotations
 import dataclasses
-from typing import Dict, List, Any
-from pathlib import Path
+from typing import Dict, Sequence, Any, Optional
 from yakut.yaml import YAMLLoader
 from ._env import canonicalize_register, flatten_registers, NAME_SEP, EnvironmentVariableError
 
@@ -22,12 +21,11 @@ class SchemaError(ValueError):
 
 @dataclasses.dataclass(frozen=True)
 class Composition:
-    predicate: List[Statement]
-    main: List[Statement]
-    finalizer: List[Statement]
-
     env: Dict[str, str]
-
+    predicate: Sequence[Statement]
+    main: Sequence[Statement]
+    delegate: Optional[str]
+    finalizer: Sequence[Statement]
     kill_timeout: float = 20.0
 
 
@@ -51,8 +49,11 @@ class JoinStatement(Statement):
     pass
 
 
-def parse(file: Path) -> Any:
-    return YAMLLoader().load(Path(file).read_text())
+def load_ast(text: str) -> Any:
+    try:
+        return YAMLLoader().load(text)
+    except Exception as ex:
+        raise SchemaError(f"Syntax error: {ex}")
 
 
 def load_composition(ast: Any, env: Dict[str, str]) -> Composition:
@@ -61,21 +62,12 @@ def load_composition(ast: Any, env: Dict[str, str]) -> Composition:
 
     - Parent process environment (i.e., the environment the orchestrator is invoked from).
     - Outer composition environment (e.g., root members of the orchestration file).
-    - Extension orchestration files.
     - Local environment variables.
     """
     if not isinstance(ast, dict):
         raise SchemaError(f"The composition shall be a dict, not {type(ast).__name__}")
-
-    imp = ast.pop("import=", None)
-    if imp is not None:
-        if not isinstance(imp, str):
-            raise SchemaError(f"Invalid import specifier: {imp!r}")
-        ext = load_composition(parse(Path(imp)), env.copy())
-    else:
-        ext = Composition(predicate=[], main=[], finalizer=[], env=env.copy())
-    del env
-
+    ast = ast.copy()  # Prevent mutation of the outer object.
+    env = env.copy()  # Prevent mutation of the outer object.
     try:
         for name, value in flatten_registers(
             {k: v for k, v in ast.items() if isinstance(k, str) and NOT_ENV not in k}
@@ -83,15 +75,23 @@ def load_composition(ast: Any, env: Dict[str, str]) -> Composition:
             if NAME_SEP in name:  # UAVCAN register.
                 name, value = canonicalize_register(name, value)
                 name = name.upper().replace(NAME_SEP, "_" * 2)
-            ext.env[name] = str(value)
+            if value is not None:
+                env[name] = str(value)
+            else:
+                env.pop(name, None)  # None is used to unset variables.
     except EnvironmentVariableError as ex:
         raise SchemaError(f"Environment variable error: {ex}") from EnvironmentVariableError
 
+    delegate = ast.pop("delegate=", None)
+    if not (delegate is None or isinstance(delegate, str)):
+        raise SchemaError(f"Delegate argument shall be a string, not {type(delegate).__name__}")
+
     out = Composition(
-        predicate=load_script(ast.pop("?=", []), ext.env) + ext.predicate,
-        main=load_script(ast.pop("$=", []), ext.env) + ext.main,
-        finalizer=load_script(ast.pop(".=", []), ext.env) + ext.finalizer,
-        env=ext.env,
+        env=env.copy(),
+        predicate=load_script(ast.pop("?=", []), env),
+        main=load_script(ast.pop("$=", []), env),
+        delegate=delegate,
+        finalizer=load_script(ast.pop(".=", []), env),
     )
     unattended = [k for k in ast if NOT_ENV in k]
     if unattended:
@@ -99,7 +99,7 @@ def load_composition(ast: Any, env: Dict[str, str]) -> Composition:
     return out
 
 
-def load_script(ast: Any, env: Dict[str, str]) -> List[Statement]:
+def load_script(ast: Any, env: Dict[str, str]) -> Sequence[Statement]:
     if isinstance(ast, list):
         return [load_statement(x, env) for x in ast]
     return [load_statement(ast, env)]

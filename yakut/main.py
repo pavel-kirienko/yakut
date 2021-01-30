@@ -152,8 +152,9 @@ def main(
     """
     _configure_logging(verbose)  # This should be done in the first order to ensure that we log things correctly.
 
-    for p in (os.getcwd(), *path):
-        _logger.debug("New path item: %s", p)
+    path = (os.getcwd(), *path)
+    _logger.debug("Path: %r", path)
+    for p in path:
         sys.path.append(str(p))
 
     ctx.obj = Purser(
