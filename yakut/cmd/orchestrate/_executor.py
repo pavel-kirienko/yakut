@@ -199,11 +199,11 @@ def exec_shell(
     )
     prefix = f"PID={ch.pid:08d} "
     try:
-        longest_env = max(map(len, env.keys()))
+        longest_env = max(map(len, env.keys())) if env else 0
         stack.log_info(
             *itertools.chain(
                 (f"{prefix}EXECUTING WITH ENVIRONMENT VARIABLES:",),
-                ((k.ljust(longest_env) + " = " + repr(v)) for k, v in env.items()),
+                ((k.ljust(longest_env) + " = " + repr(v)) for k, v in env.items()) if env else ["<no variables>"],
                 cmd.splitlines(),
             ),
         )

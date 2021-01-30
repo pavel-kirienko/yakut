@@ -6,47 +6,16 @@ import sys
 import time
 from pathlib import Path
 import pytest
-from yakut.cmd.orchestrate import exec_composition, load_composition, Stack, Context, ErrorCode, exec_file
+from yakut.cmd.orchestrate import exec_composition, load_composition, Stack, Context, ErrorCode, exec_file, load_ast
 from .... import ROOT_DIR
 
 
-if sys.platform.startswith("win"):
+if sys.platform.startswith("win"):  # pragma: no cover
     pytest.skip("These are GNU/Linux-only tests", allow_module_level=True)
 
 
-# language=YAML
-_TEST_A = """
-?=: echo $A $B $C $D      # Variable D is erased (see below).
-$=:
-- '>&2 echo $A__B__C__STRING'
-- sleep 10
-- sleep 8
--
-- echo finalizer
-- $=:
-  - |
-    sleep 0.5                           # Ensure deterministic ordering.
-    echo "a.d.e: $A__D__E__NATURAL8"    # This is a multi-line statement.
-  - ?=: []
-.=:
-- ?=: test -n "$CRASH"
-  delegate=: nonexistent.orc.yaml
--
-- exit 100
-A: 100
-B: abc
-D:      # Variable D is erased.
-a:
-  b:
-    c: text value
-  d.e.natural8: [1, 2, 3]
-"""
-
-
-def _unittest_execute_a(capsys: pytest.CaptureFixture) -> None:
-    from yakut.yaml import YAMLLoader
-
-    ast = YAMLLoader().load(_TEST_A)
+def _unittest_a(capsys: pytest.CaptureFixture) -> None:
+    ast = load_ast((Path(__file__).parent / "a.orc.yaml").read_text())
     comp = load_composition(ast, {"C": "DEF", "D": "this variable will be unset"})
     print(comp)
     ctx = Context(lookup_paths=[])
@@ -83,7 +52,7 @@ def _unittest_execute_a(capsys: pytest.CaptureFixture) -> None:
     assert ErrorCode.FILE_ERROR == exec_composition(ctx, comp, predicate=lambda: True, stack=Stack())
 
 
-def _unittest_execute_b(capsys: pytest.CaptureFixture) -> None:
+def _unittest_b(capsys: pytest.CaptureFixture) -> None:
     ctx = Context(lookup_paths=[ROOT_DIR, Path(__file__).parent])
     _ = capsys.readouterr()
     assert 0 == exec_file(ctx, "b.orc.yaml", env={"PROCEED_B": "1"}, predicate=lambda: True)

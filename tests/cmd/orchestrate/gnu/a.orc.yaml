@@ -1,0 +1,24 @@
+?=: echo $A $B $C $D      # Variable D is erased (see below).
+$=:
+- '>&2 echo $A__B__C__STRING'
+- sleep 10
+- sleep 8
+-
+- echo finalizer
+- $=:
+  - |
+    sleep 0.5                           # Ensure deterministic ordering.
+    echo "a.d.e: $A__D__E__NATURAL8"    # This is a multi-line statement.
+  - ?=: []
+.=:
+- ?=: test -n "$CRASH"
+  delegate=: nonexistent.orc.yaml
+-
+- exit 100
+A: 100
+B: abc
+D:      # Variable D is erased.
+a:
+  b:
+    c: text value
+  d.e.natural8: [1, 2, 3]

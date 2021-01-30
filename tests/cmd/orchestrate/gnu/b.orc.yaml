@@ -1,7 +1,7 @@
 $=:
   ?=: test -n "$PROCEED_B"
   $=: echo main b
-  delegate=: tests/cmd/orchestrate/c.orc.yaml
+  delegate=: tests/cmd/orchestrate/gnu/c.orc.yaml
 .=:
 - echo finalizer b $PROCEED_B
 - sleep 1
