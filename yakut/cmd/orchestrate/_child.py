@@ -4,13 +4,11 @@
 
 from __future__ import annotations
 import os
-import io
 import sys
 import time
 import signal
-from concurrent.futures import ThreadPoolExecutor, wait
-from subprocess import Popen, PIPE, DEVNULL
-from typing import Dict, Optional, Callable, List, Tuple
+from subprocess import Popen, DEVNULL
+from typing import Dict, Optional, Callable, List, Tuple, BinaryIO
 import logging
 
 
@@ -33,44 +31,24 @@ class Child:
 
     - :meth:`poll` for querying the status.
     - :meth:`stop` for stopping with automatic escalation of the signal strength.
-    - The constructor accepts callbacks that are invoked for each line from stdout/stderr.
+    - The constructor accepts file objects where the child process output is sent to.
+
+    When running on Windows, it may be desirable to use PowerShell as the system shell.
+    For that, export the COMSPEC environment variable.
     """
 
-    _STREAM_BUFFER_SIZE = 1024 ** 2
-    _STREAM_POLL_INTERVAL = 0.02
-
-    def __init__(
-        self,
-        cmd: str,
-        env: Dict[str, str],
-        line_handler_stdout: Callable[[str], None],
-        line_handler_stderr: Callable[[str], None],
-    ) -> None:
+    def __init__(self, cmd: str, env: Dict[str, str], *, stdout: BinaryIO, stderr: BinaryIO) -> None:
         """
         :param cmd: Shell command to execute. Execution starts immediately.
         :param env: Additional environment variables.
-        :param line_handler_stdout: Called from a ***separate worker thread*** when the child emits a line into stdout.
-        :param line_handler_stderr: Ditto, but for stderr.
+        :param stdout: Stdout from the child process is redirected there.
+        :param stderr: Ditto, but for stderr.
         """
         self._return: Optional[int] = None
         self._signaling_schedule: List[Tuple[float, Callable[[], None]]] = []
-        self._executor = ThreadPoolExecutor(max_workers=999)
         e = os.environ.copy()
         e.update(env)
-        self._proc = Popen(
-            cmd,
-            env=e,
-            shell=True,
-            text=True,
-            stdout=PIPE,
-            stderr=PIPE,
-            stdin=DEVNULL,
-            bufsize=Child._STREAM_BUFFER_SIZE,
-        )
-        self._futures = {
-            self._executor.submit(self._forward_line_by_line, self._proc.stdout, line_handler_stdout),
-            self._executor.submit(self._forward_line_by_line, self._proc.stderr, line_handler_stderr),
-        }
+        self._proc = Popen(cmd, env=e, shell=True, stdout=stdout, stderr=stderr, stdin=DEVNULL, bufsize=1)
 
     @property
     def pid(self) -> int:
@@ -84,11 +62,6 @@ class Child:
         :param timeout: Block for this many seconds, at most.
         :return: None if still running, exit code if finished (idempotent).
         """
-        if self._futures:
-            done, self._futures = wait(self._futures, timeout=0)
-            for f in done:  # Propagate exceptions, if any, from the background tasks.
-                f.result()
-
         if self._return is None:
             if self._signaling_schedule:
                 deadline, handler = self._signaling_schedule[0]
@@ -156,37 +129,18 @@ class Child:
             self._return = -SIGNAL_KILL
         self._proc.send_signal(SIGNAL_KILL)
 
-    def _forward_line_by_line(self, stream: io.TextIOWrapper, line_handler: Callable[[str], None]) -> None:
-        buf = io.StringIO()
-
-        def once() -> None:
-            nonlocal buf
-            time.sleep(Child._STREAM_POLL_INTERVAL)
-            for ch in stream.read():
-                if ch == "\n":
-                    line_handler(buf.getvalue())
-                    buf = io.StringIO()
-                else:
-                    buf.write(ch)
-
-        while self._return is None and self._proc.poll() is None:
-            once()
-        for _ in range(3):
-            once()
-        if buf.getvalue():  # Flush the last unterminated line, if any.
-            line_handler(buf.getvalue())
-
     def __str__(self) -> str:
         return f"Child {self.pid:08d}"
 
 
 def _unittest_child(caplog: object) -> None:
     import pytest
+    from pathlib import Path
 
     assert isinstance(caplog, pytest.LogCaptureFixture)
 
-    ln_out: List[str] = []
-    ln_err: List[str] = []
+    io_out = Path("stdout")
+    io_err = Path("stderr")
 
     if sys.platform.startswith("win"):  # pragma: no cover
         py = (
@@ -204,7 +158,7 @@ def _unittest_child(caplog: object) -> None:
         )
 
     with caplog.at_level(logging.CRITICAL):
-        c = Child(f"python -c '{py}'", {}, line_handler_stdout=ln_out.append, line_handler_stderr=ln_err.append)
+        c = Child(f"python -c '{py}'", {}, stdout=io_out.open("wb"), stderr=io_err.open("wb"))
         assert c.poll(0.1) is None
         c.stop(1.0, 2.0)
         assert c.poll(1.0) is None
@@ -213,30 +167,25 @@ def _unittest_child(caplog: object) -> None:
         assert res is not None
         assert res < 0  # Killed
         c.stop(1.0, 2.0)  # No effect because already dead.
-    assert not ln_out
-    assert not ln_err
+    assert not io_out.read_text()
+    assert not io_err.read_text()
 
-    c = Child(
-        f"python -c 'import time; time.sleep(10)'",
-        {},
-        line_handler_stdout=ln_out.append,
-        line_handler_stderr=ln_err.append,
-    )
+    c = Child(f"python -c 'import time; time.sleep(10)'", {}, stdout=io_out.open("wb"), stderr=io_err.open("wb"))
     assert c.poll(0.1) is None
     c.kill()
     res = c.poll(1.0)
     assert res is not None
     assert res < 0  # Killed
-    assert not ln_out
-    assert not ln_err
+    assert not io_out.read_text()
+    assert not io_err.read_text()
 
     c = Child(
         """python -c 'import sys; print("ABC", file=sys.stderr); print("DEF"); print("GHI", end="")'""",
         {},
-        line_handler_stdout=ln_out.append,
-        line_handler_stderr=ln_err.append,
+        stdout=io_out.open("wb"),
+        stderr=io_err.open("wb"),
     )
     assert 0 == c.poll(1.0)
     time.sleep(2.0)
-    assert ln_out == ["DEF", "GHI"]
-    assert ln_err == ["ABC"]
+    assert io_out.read_text().splitlines() == ["DEF", "GHI"]
+    assert io_err.read_text().splitlines() == ["ABC"]

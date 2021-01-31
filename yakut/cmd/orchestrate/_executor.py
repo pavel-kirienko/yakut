@@ -10,7 +10,6 @@ import itertools
 import dataclasses
 from concurrent.futures import Future, ThreadPoolExecutor, wait
 from typing import Dict, List, Optional, Callable, Any, Sequence
-from functools import partial
 from pathlib import Path
 import logging
 from ._child import Child
@@ -191,12 +190,7 @@ def exec_shell(
     ctx: Context, cmd: str, env: Dict[str, str], *, kill_timeout: float, predicate: FlagDelegate, stack: Stack
 ) -> int:
     started_at = time.monotonic()
-    ch = Child(
-        cmd,
-        env,
-        line_handler_stdout=partial(print),
-        line_handler_stderr=partial(print, file=sys.stderr),
-    )
+    ch = Child(cmd, env, stdout=sys.stdout.buffer, stderr=sys.stderr.buffer)
     prefix = f"PID={ch.pid:08d} "
     try:
         longest_env = max(map(len, env.keys())) if env else 0

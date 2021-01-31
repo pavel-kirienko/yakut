@@ -14,50 +14,64 @@ if sys.platform.startswith("win"):  # pragma: no cover
     pytest.skip("These are GNU/Linux-only tests", allow_module_level=True)
 
 
-def _unittest_a(capsys: pytest.CaptureFixture[str]) -> None:
+def _std_reset() -> None:
+    if sys.stdout.seekable():
+        sys.stdout.seek(0)
+        sys.stdout.truncate(0)
+    if sys.stderr.seekable():
+        sys.stderr.seek(0)
+        sys.stderr.truncate(0)
+
+
+def _std_flush() -> None:
+    sys.stdout.flush()
+    sys.stderr.flush()
+
+
+def _unittest_a(stdout_file: Path, stderr_file: Path) -> None:
     ast = load_ast((Path(__file__).parent / "a.orc.yaml").read_text())
     comp = load_composition(ast, {"C": "DEF", "D": "this variable will be unset"})
     print(comp)
     ctx = Context(lookup_paths=[])
 
     # Regular test, runs until completion.
-    _ = capsys.readouterr()  # Drop the capture buffer.
+    _std_reset()
     started_at = time.monotonic()
     assert 100 == exec_composition(ctx, comp, predicate=_true, stack=Stack())
     elapsed = time.monotonic() - started_at
     assert 10 <= elapsed <= 15, "Parallel execution is not handled correctly."
-    cap = capsys.readouterr()
-    assert cap.out.splitlines() == [
+    _std_flush()
+    assert stdout_file.read_text().splitlines() == [
         "100 abc DEF",
         "finalizer",
         "a.d.e: 1 2 3",
     ]
-    assert "text value\n" in cap.err
+    assert "text value\n" in stderr_file.read_text()
 
     # Interrupted five seconds in.
-    _ = capsys.readouterr()  # Drop the capture buffer.
+    _std_reset()
     started_at = time.monotonic()
     assert 0 != exec_composition(ctx, comp, predicate=lambda: time.monotonic() - started_at < 5.0, stack=Stack())
     elapsed = time.monotonic() - started_at
     assert 5 <= elapsed <= 9, "Interruption is not handled correctly."
-    cap = capsys.readouterr()
-    assert cap.out.splitlines() == [
+    _std_flush()
+    assert stdout_file.read_text().splitlines() == [
         "100 abc DEF",
     ]
-    assert "text value\n" in cap.err
+    assert "text value\n" in stderr_file.read_text()
 
-    # Refers to an non-existent file.
+    # Refers to a non-existent file.
     comp = load_composition(ast, {"CRASH": "1"})
     print(comp)
     assert ErrorCode.FILE_ERROR == exec_composition(ctx, comp, predicate=_true, stack=Stack())
 
 
-def _unittest_b(capsys: pytest.CaptureFixture[str]) -> None:
+def _unittest_b(stdout_file: Path) -> None:
     ctx = Context(lookup_paths=[ROOT_DIR, Path(__file__).parent])
-    _ = capsys.readouterr()
+    _std_reset()
     assert 0 == exec_file(ctx, "b.orc.yaml", env={"PROCEED_B": "1"}, predicate=_true)
-    cap = capsys.readouterr()
-    assert cap.out.splitlines() == [
+    _std_flush()
+    assert stdout_file.read_text().splitlines() == [
         "main b",
         "123",
         "456",
@@ -65,24 +79,24 @@ def _unittest_b(capsys: pytest.CaptureFixture[str]) -> None:
         "finalizer b 1",
     ]
 
-    _ = capsys.readouterr()
+    _std_reset()
     assert 0 == exec_file(ctx, str((Path(__file__).parent / "b.orc.yaml").absolute()), env={}, predicate=_true)
-    cap = capsys.readouterr()
-    assert cap.out.splitlines() == [
+    _std_flush()
+    assert stdout_file.read_text().splitlines() == [
         "finalizer b",
     ]
 
-    _ = capsys.readouterr()
+    _std_reset()
     assert 0 == exec_file(ctx, "b.orc.yaml", env={"PLEASE_FAIL": "1"}, predicate=_true)
-    cap = capsys.readouterr()
-    assert cap.out.splitlines() == [
+    _std_flush()
+    assert stdout_file.read_text().splitlines() == [
         "finalizer b",
     ]
 
-    _ = capsys.readouterr()
+    _std_reset()
     assert 42 == exec_file(ctx, "b.orc.yaml", env={"PROCEED_B": "1", "PLEASE_FAIL": "1"}, predicate=_true)
-    cap = capsys.readouterr()
-    assert cap.out.splitlines() == [
+    _std_flush()
+    assert stdout_file.read_text().splitlines() == [
         "main b",
         "123",
         "456",
