@@ -17,7 +17,7 @@ import logging
 _logger = logging.getLogger(__name__)
 
 
-if sys.platform.startswith("win"):
+if sys.platform.startswith("win"):  # pragma: no cover
     SIGNAL_INTERRUPT = signal.SIGBREAK
     SIGNAL_TERMINATE = signal.SIGTERM
     SIGNAL_KILL = signal.SIGABRT
@@ -188,7 +188,7 @@ def _unittest_child(caplog: object) -> None:
     ln_out: List[str] = []
     ln_err: List[str] = []
 
-    if sys.platform.startswith("win"):
+    if sys.platform.startswith("win"):  # pragma: no cover
         py = (
             "import time, signal as s; "
             + "s.signal(s.SIGBREAK, lambda *_: None); "
@@ -212,6 +212,7 @@ def _unittest_child(caplog: object) -> None:
             res = c.poll(0.1)
         assert res is not None
         assert res < 0  # Killed
+        c.stop(1.0, 2.0)  # No effect because already dead.
     assert not ln_out
     assert not ln_err
 

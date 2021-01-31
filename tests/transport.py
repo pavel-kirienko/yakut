@@ -29,12 +29,12 @@ def _generate() -> typing.Iterator[typing.Callable[[], typing.Iterator[Transport
     Sensible transport configurations supported by the CLI to test against.
     Don't forget to extend when adding support for new transports.
     """
-    if sys.platform == "linux":
+    if sys.platform == "linux":  # pragma: no branch
 
         def sudo(cmd: str, ensure_success: bool = True) -> None:
             c = f"sudo {cmd}"
             r = os.system(c)
-            if ensure_success and 0 != r:
+            if ensure_success and 0 != r:  # pragma: no cover
                 raise RuntimeError(f"Command {c!r} failed with exit code {r}")
 
         sudo("modprobe can")

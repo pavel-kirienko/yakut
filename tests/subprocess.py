@@ -115,7 +115,7 @@ class Subprocess:
         cmd = _make_process_args(*args)
         _logger.info("Starting subprocess: %s", cmd)
 
-        if sys.platform.startswith("win"):
+        if sys.platform.startswith("win"):  # pragma: no cover
             # If the current process group is used, CTRL_C_EVENT will kill the parent and everyone in the group!
             creationflags: int = subprocess.CREATE_NEW_PROCESS_GROUP
         else:

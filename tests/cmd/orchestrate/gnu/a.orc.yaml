@@ -4,6 +4,7 @@ $=:
 - sleep 10
 - sleep 8
 -
+-  # The second join statement is redundant but it should cause no error.
 - echo finalizer
 - $=:
   - |

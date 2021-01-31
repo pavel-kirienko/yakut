@@ -23,7 +23,7 @@ def _unittest_a(capsys: pytest.CaptureFixture[str]) -> None:
     # Regular test, runs until completion.
     _ = capsys.readouterr()  # Drop the capture buffer.
     started_at = time.monotonic()
-    assert 100 == exec_composition(ctx, comp, predicate=lambda: True, stack=Stack())
+    assert 100 == exec_composition(ctx, comp, predicate=_true, stack=Stack())
     elapsed = time.monotonic() - started_at
     assert 10 <= elapsed <= 15, "Parallel execution is not handled correctly."
     cap = capsys.readouterr()
@@ -49,13 +49,13 @@ def _unittest_a(capsys: pytest.CaptureFixture[str]) -> None:
     # Refers to an non-existent file.
     comp = load_composition(ast, {"CRASH": "1"})
     print(comp)
-    assert ErrorCode.FILE_ERROR == exec_composition(ctx, comp, predicate=lambda: True, stack=Stack())
+    assert ErrorCode.FILE_ERROR == exec_composition(ctx, comp, predicate=_true, stack=Stack())
 
 
 def _unittest_b(capsys: pytest.CaptureFixture[str]) -> None:
     ctx = Context(lookup_paths=[ROOT_DIR, Path(__file__).parent])
     _ = capsys.readouterr()
-    assert 0 == exec_file(ctx, "b.orc.yaml", env={"PROCEED_B": "1"}, predicate=lambda: True)
+    assert 0 == exec_file(ctx, "b.orc.yaml", env={"PROCEED_B": "1"}, predicate=_true)
     cap = capsys.readouterr()
     assert cap.out.splitlines() == [
         "main b",
@@ -66,21 +66,21 @@ def _unittest_b(capsys: pytest.CaptureFixture[str]) -> None:
     ]
 
     _ = capsys.readouterr()
-    assert 0 == exec_file(ctx, str((Path(__file__).parent / "b.orc.yaml").absolute()), env={}, predicate=lambda: True)
+    assert 0 == exec_file(ctx, str((Path(__file__).parent / "b.orc.yaml").absolute()), env={}, predicate=_true)
     cap = capsys.readouterr()
     assert cap.out.splitlines() == [
         "finalizer b",
     ]
 
     _ = capsys.readouterr()
-    assert 0 == exec_file(ctx, "b.orc.yaml", env={"PLEASE_FAIL": "1"}, predicate=lambda: True)
+    assert 0 == exec_file(ctx, "b.orc.yaml", env={"PLEASE_FAIL": "1"}, predicate=_true)
     cap = capsys.readouterr()
     assert cap.out.splitlines() == [
         "finalizer b",
     ]
 
     _ = capsys.readouterr()
-    assert 42 == exec_file(ctx, "b.orc.yaml", env={"PROCEED_B": "1", "PLEASE_FAIL": "1"}, predicate=lambda: True)
+    assert 42 == exec_file(ctx, "b.orc.yaml", env={"PROCEED_B": "1", "PLEASE_FAIL": "1"}, predicate=_true)
     cap = capsys.readouterr()
     assert cap.out.splitlines() == [
         "main b",
@@ -91,8 +91,12 @@ def _unittest_b(capsys: pytest.CaptureFixture[str]) -> None:
     ]
 
     ctx = Context(lookup_paths=[])
-    assert ErrorCode.FILE_ERROR == exec_file(ctx, "b.orc.yaml", env={"PROCEED_B": "1"}, predicate=lambda: True)
+    assert ErrorCode.FILE_ERROR == exec_file(ctx, "b.orc.yaml", env={"PROCEED_B": "1"}, predicate=_true)
     ctx = Context(lookup_paths=[Path(__file__).parent])
-    assert ErrorCode.FILE_ERROR == exec_file(ctx, "b.orc.yaml", env={"PROCEED_B": "1"}, predicate=lambda: True)
+    assert ErrorCode.FILE_ERROR == exec_file(ctx, "b.orc.yaml", env={"PROCEED_B": "1"}, predicate=_true)
     ctx = Context(lookup_paths=[])
-    assert ErrorCode.FILE_ERROR == exec_file(ctx, "b.orc.yaml", env={}, predicate=lambda: True)
+    assert ErrorCode.FILE_ERROR == exec_file(ctx, "b.orc.yaml", env={}, predicate=_true)
+
+
+def _true() -> bool:
+    return True

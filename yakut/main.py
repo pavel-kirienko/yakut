@@ -43,14 +43,14 @@ class Purser:
         return self._f_formatter()
 
     def get_transport(self) -> Transport:
-        if self._transport is None:
+        if self._transport is None:  # pragma: no branch
             self._transport = self._f_transport()
         if self._transport is not None:
             return self._transport
         click.get_current_context().fail("Transport not configured")
 
     def get_node(self, name_suffix: str, allow_anonymous: bool) -> object:
-        if self._node is None:
+        if self._node is None:  # pragma: no branch
             tr = self.get_transport()
             self._node = self._f_node(tr, name_suffix=name_suffix, allow_anonymous=allow_anonymous)
         return self._node
