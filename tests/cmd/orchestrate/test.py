@@ -4,8 +4,10 @@
 
 from __future__ import annotations
 import time
+import json
 from pathlib import Path
-from tests.subprocess import Subprocess
+import pytest
+from tests.subprocess import Subprocess, execute_cli
 
 
 def _unittest_x() -> None:
@@ -28,3 +30,22 @@ def _unittest_x() -> None:
         "Hello world!",
         "finalizer",
     ]
+
+
+def _unittest_pub_sub() -> None:
+    from yakut.paths import DEFAULT_PUBLIC_REGULATED_DATA_TYPES_ARCHIVE_URI
+
+    _, stdout, _ = execute_cli(
+        "orc",
+        str((Path(__file__).parent / "pub_sub.orc.yaml").absolute()),
+        environment_variables={"DSDL_SRC": DEFAULT_PUBLIC_REGULATED_DATA_TYPES_ARCHIVE_URI},
+        timeout=120.0,
+    )
+    objects = list(map(json.loads, stdout.splitlines()))
+    assert len(objects) == 2
+    for ob in objects:
+        assert ob == {
+            "33": {
+                "radian": pytest.approx(2.31),
+            },
+        }

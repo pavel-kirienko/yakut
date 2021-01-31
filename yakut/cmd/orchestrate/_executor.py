@@ -211,7 +211,7 @@ def exec_shell(
         while predicate() and ret is None:
             ret = ch.poll(ctx.poll_interval)
         if ret is None:
-            stack.log_warning(f"{prefix}Stopping manually")
+            stack.log_warning(f"{prefix}Stopping (was started {time.monotonic() - started_at:.1f} sec ago)")
             ch.stop(kill_timeout * 0.75, kill_timeout)
         while ret is None:
             ret = ch.poll(ctx.poll_interval)
