@@ -72,7 +72,7 @@ If a DSDL root namespace is specified as an input, it is automatically added to 
 @click.option(
     "--output",
     "-O",
-    type=click.Path(file_okay=False, dir_okay=True, writable=True, resolve_path=True),
+    type=str,
     help=f"""
 Path to the directory where the compilation outputs will be stored.
 If not specified, defaults to the current working directory.

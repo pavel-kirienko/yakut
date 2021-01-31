@@ -93,6 +93,7 @@ _ENV_VAR_PATH = "YAKUT_PATH"
     cls=AbbreviatedGroup,
     context_settings={
         "max_content_width": click.get_terminal_size()[0],
+        "auto_envvar_prefix": "YAKUT",  # Specified here, not in __main__.py, otherwise doesn't work when installed.
     },
 )
 @click.version_option(version=yakut.__version__)

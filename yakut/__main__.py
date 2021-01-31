@@ -5,4 +5,4 @@
 if __name__ == "__main__":
     from yakut import main
 
-    main(auto_envvar_prefix="YAKUT")  # pylint: disable=no-value-for-parameter,unexpected-keyword-arg
+    main()  # pylint: disable=no-value-for-parameter
