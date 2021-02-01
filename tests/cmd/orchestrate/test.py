@@ -10,9 +10,9 @@ import pytest
 from tests.subprocess import Subprocess, execute_cli
 
 
-def _unittest_x() -> None:
+def _unittest_basic() -> None:
     # Run to completion.
-    proc = Subprocess.cli("-v", "orc", str((Path(__file__).parent / "x.orc.yaml").absolute()))
+    proc = Subprocess.cli("-v", "orc", str((Path(__file__).parent / "basic.orc.yaml").absolute()))
     exit_code, stdout, _stderr = proc.wait(timeout=10)
     assert exit_code == 88
     assert stdout.splitlines() == [
@@ -22,7 +22,7 @@ def _unittest_x() -> None:
     ]
 
     # Premature termination.
-    proc = Subprocess.cli("-v", f"--path={Path(__file__).parent}", "orc", "x.orc.yaml")
+    proc = Subprocess.cli("-v", f"--path={Path(__file__).parent}", "orc", "basic.orc.yaml")
     time.sleep(1.0)
     exit_code, stdout, _stderr = proc.wait(timeout=10, interrupt=True)
     assert exit_code not in (0, 88)
@@ -49,3 +49,13 @@ def _unittest_pub_sub() -> None:
                 "radian": pytest.approx(2.31),
             },
         }
+
+
+def _unittest_call() -> None:
+    exit_code, stdout, _ = execute_cli(
+        "-v", f"--path={Path(__file__).parent}", "orc", "call.orc.yaml", timeout=60.0, ensure_success=False
+    )
+    assert 99 == exit_code
+    assert stdout.splitlines() == [
+        "This is my variable.",
+    ]

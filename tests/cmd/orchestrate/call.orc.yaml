@@ -1,0 +1,4 @@
+call=:
+- vars.orc.yaml   # Sets   $VARIABLE
+- echo.orc.yaml   # Prints $VARIABLE
+.=: exit 99
