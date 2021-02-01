@@ -29,6 +29,8 @@ def _std_flush() -> None:
 
 
 def _unittest_a(stdout_file: Path, stderr_file: Path) -> None:
+    _ = stdout_file, stderr_file
+
     ast = load_ast((Path(__file__).parent / "a.orc.yaml").read_text())
     comp = load_composition(ast, {"C": "DEF", "D": "this variable will be unset"})
     print(comp)
@@ -41,12 +43,14 @@ def _unittest_a(stdout_file: Path, stderr_file: Path) -> None:
     elapsed = time.monotonic() - started_at
     assert 10 <= elapsed <= 15, "Parallel execution is not handled correctly."
     _std_flush()
-    assert stdout_file.read_text().splitlines() == [
+    sys.stdout.seek(0)
+    assert sys.stdout.read().splitlines() == [
         "100 abc DEF",
         "finalizer",
         "a.d.e: 1 2 3",
     ]
-    assert "text value\n" in stderr_file.read_text()
+    sys.stderr.seek(0)
+    assert "text value\n" in sys.stderr.read()
 
     # Interrupted five seconds in.
     _std_reset()
@@ -55,10 +59,12 @@ def _unittest_a(stdout_file: Path, stderr_file: Path) -> None:
     elapsed = time.monotonic() - started_at
     assert 5 <= elapsed <= 9, "Interruption is not handled correctly."
     _std_flush()
-    assert stdout_file.read_text().splitlines() == [
+    sys.stdout.seek(0)
+    assert sys.stdout.read().splitlines() == [
         "100 abc DEF",
     ]
-    assert "text value\n" in stderr_file.read_text()
+    sys.stderr.seek(0)
+    assert "text value\n" in sys.stderr.read()
 
     # Refers to a non-existent file.
     comp = load_composition(ast, {"CRASH": "1"})
@@ -67,12 +73,15 @@ def _unittest_a(stdout_file: Path, stderr_file: Path) -> None:
 
 
 def _unittest_b(stdout_file: Path) -> None:
+    _ = stdout_file
+
     ctx = Context(lookup_paths=[ROOT_DIR, Path(__file__).parent])
     _std_reset()
     env = {"PROCEED_B": "1"}
     assert 0 == exec_file(ctx, "b.orc.yaml", env, gate=_true)
     _std_flush()
-    assert stdout_file.read_text().splitlines() == [
+    sys.stdout.seek(0)
+    assert sys.stdout.read().splitlines() == [
         "main b",
         "123",
         "456",
@@ -89,7 +98,8 @@ def _unittest_b(stdout_file: Path) -> None:
     env = {}
     assert 0 == exec_file(ctx, str((Path(__file__).parent / "b.orc.yaml").absolute()), env, gate=_true)
     _std_flush()
-    assert stdout_file.read_text().splitlines() == [
+    sys.stdout.seek(0)
+    assert sys.stdout.read().splitlines() == [
         "finalizer b",
     ]
     assert env == {
@@ -101,7 +111,8 @@ def _unittest_b(stdout_file: Path) -> None:
     env = {"PLEASE_FAIL": "1"}
     assert 0 == exec_file(ctx, "b.orc.yaml", env, gate=_true)
     _std_flush()
-    assert stdout_file.read_text().splitlines() == [
+    sys.stdout.seek(0)
+    assert sys.stdout.read().splitlines() == [
         "finalizer b",
     ]
     assert env == {
@@ -114,7 +125,8 @@ def _unittest_b(stdout_file: Path) -> None:
     env = {"PROCEED_B": "1", "PLEASE_FAIL": "1"}
     assert 42 == exec_file(ctx, "b.orc.yaml", env, gate=_true)
     _std_flush()
-    assert stdout_file.read_text().splitlines() == [
+    sys.stdout.seek(0)
+    assert sys.stdout.read().splitlines() == [
         "main b",
         "123",
         "456",

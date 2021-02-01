@@ -5,14 +5,15 @@
 # pylint: disable=unused-import
 import sys
 import tempfile
-import pytest
+from typing import Iterator
 from pathlib import Path
+import pytest
 from .dsdl import compiled_dsdl as compiled_dsdl
 from .transport import transport_factory as transport_factory
 
 
 @pytest.fixture()
-def stdout_file() -> Path:
+def stdout_file() -> Iterator[Path]:
     """
     Replaces :attr:`sys.stdout` with a regular binary file on disk. The value of the fixture is the path to the file.
     The original stream is restored afterwards automatically.
@@ -27,7 +28,7 @@ def stdout_file() -> Path:
 
 
 @pytest.fixture()
-def stderr_file() -> Path:
+def stderr_file() -> Iterator[Path]:
     """
     Like :func:`stdout_file` but for stderr.
     """

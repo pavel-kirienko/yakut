@@ -32,7 +32,7 @@ class Composition:
     def kill_timeout(self) -> float:
         try:
             # This is very tentative and is not yet specified. May be changed.
-            return float(self.env.get("(kill_timeout)"))
+            return float(self.env.get("(kill_timeout)"))  # type: ignore
         except (ValueError, TypeError):
             return 20.0
 
