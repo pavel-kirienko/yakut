@@ -46,6 +46,6 @@ def orchestrate(purser: yakut.Purser, orchestration_file: str) -> None:
         signal.signal(signal.SIGHUP, on_signal)
 
     ctx = Context(lookup_paths=purser.paths)
-    res = exec_file(ctx, orchestration_file, {}, predicate=lambda: sig_num == 0)
+    res = exec_file(ctx, orchestration_file, {}, gate=lambda: sig_num == 0)
 
     sys.exit(res if res != 0 else -sig_num)

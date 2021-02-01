@@ -13,7 +13,8 @@ $=:
   - ?=: []
 .=:
 - ?=: test -n "$CRASH"
-  delegate=: nonexistent.orc.yaml
+  $=:
+    call=: nonexistent.orc.yaml
 -
 - exit 100
 A: 100

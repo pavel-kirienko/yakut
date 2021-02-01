@@ -37,7 +37,7 @@ def _unittest_a(stdout_file: Path, stderr_file: Path) -> None:
     # Regular test, runs until completion.
     _std_reset()
     started_at = time.monotonic()
-    assert 100 == exec_composition(ctx, comp, predicate=_true, stack=Stack())
+    assert 100 == exec_composition(ctx, comp, gate=_true, stack=Stack())
     elapsed = time.monotonic() - started_at
     assert 10 <= elapsed <= 15, "Parallel execution is not handled correctly."
     _std_flush()
@@ -51,7 +51,7 @@ def _unittest_a(stdout_file: Path, stderr_file: Path) -> None:
     # Interrupted five seconds in.
     _std_reset()
     started_at = time.monotonic()
-    assert 0 != exec_composition(ctx, comp, predicate=lambda: time.monotonic() - started_at < 5.0, stack=Stack())
+    assert 0 != exec_composition(ctx, comp, gate=lambda: time.monotonic() - started_at < 5.0, stack=Stack())
     elapsed = time.monotonic() - started_at
     assert 5 <= elapsed <= 9, "Interruption is not handled correctly."
     _std_flush()
@@ -63,13 +63,14 @@ def _unittest_a(stdout_file: Path, stderr_file: Path) -> None:
     # Refers to a non-existent file.
     comp = load_composition(ast, {"CRASH": "1"})
     print(comp)
-    assert ErrorCode.FILE_ERROR == exec_composition(ctx, comp, predicate=_true, stack=Stack())
+    assert ErrorCode.FILE_ERROR == exec_composition(ctx, comp, gate=_true, stack=Stack())
 
 
 def _unittest_b(stdout_file: Path) -> None:
     ctx = Context(lookup_paths=[ROOT_DIR, Path(__file__).parent])
     _std_reset()
-    assert 0 == exec_file(ctx, "b.orc.yaml", env={"PROCEED_B": "1"}, predicate=_true)
+    env = {"PROCEED_B": "1"}
+    assert 0 == exec_file(ctx, "b.orc.yaml", env, gate=_true)
     _std_flush()
     assert stdout_file.read_text().splitlines() == [
         "main b",
@@ -78,23 +79,40 @@ def _unittest_b(stdout_file: Path) -> None:
         "finalizer b",
         "finalizer b 1",
     ]
+    assert env == {
+        "PROCEED_B": "1",
+        "FOO": "123",
+        "BAR": "123",
+    }
 
     _std_reset()
-    assert 0 == exec_file(ctx, str((Path(__file__).parent / "b.orc.yaml").absolute()), env={}, predicate=_true)
+    env = {}
+    assert 0 == exec_file(ctx, str((Path(__file__).parent / "b.orc.yaml").absolute()), env, gate=_true)
     _std_flush()
     assert stdout_file.read_text().splitlines() == [
         "finalizer b",
     ]
+    assert env == {
+        "FOO": "123",
+        "BAR": "123",
+    }
 
     _std_reset()
-    assert 0 == exec_file(ctx, "b.orc.yaml", env={"PLEASE_FAIL": "1"}, predicate=_true)
+    env = {"PLEASE_FAIL": "1"}
+    assert 0 == exec_file(ctx, "b.orc.yaml", env, gate=_true)
     _std_flush()
     assert stdout_file.read_text().splitlines() == [
         "finalizer b",
     ]
+    assert env == {
+        "PLEASE_FAIL": "1",
+        "FOO": "123",
+        "BAR": "123",
+    }
 
     _std_reset()
-    assert 42 == exec_file(ctx, "b.orc.yaml", env={"PROCEED_B": "1", "PLEASE_FAIL": "1"}, predicate=_true)
+    env = {"PROCEED_B": "1", "PLEASE_FAIL": "1"}
+    assert 42 == exec_file(ctx, "b.orc.yaml", env, gate=_true)
     _std_flush()
     assert stdout_file.read_text().splitlines() == [
         "main b",
@@ -103,13 +121,19 @@ def _unittest_b(stdout_file: Path) -> None:
         "finalizer b",
         "finalizer b 1",
     ]
+    assert env == {
+        "PROCEED_B": "1",
+        "PLEASE_FAIL": "1",
+        "FOO": "123",
+        "BAR": "123",
+    }
 
     ctx = Context(lookup_paths=[])
-    assert ErrorCode.FILE_ERROR == exec_file(ctx, "b.orc.yaml", env={"PROCEED_B": "1"}, predicate=_true)
+    assert ErrorCode.FILE_ERROR == exec_file(ctx, "b.orc.yaml", {"PROCEED_B": "1"}, gate=_true)
     ctx = Context(lookup_paths=[Path(__file__).parent])
-    assert ErrorCode.FILE_ERROR == exec_file(ctx, "b.orc.yaml", env={"PROCEED_B": "1"}, predicate=_true)
+    assert ErrorCode.FILE_ERROR == exec_file(ctx, "b.orc.yaml", {"PROCEED_B": "1"}, gate=_true)
     ctx = Context(lookup_paths=[])
-    assert ErrorCode.FILE_ERROR == exec_file(ctx, "b.orc.yaml", env={}, predicate=_true)
+    assert ErrorCode.FILE_ERROR == exec_file(ctx, "b.orc.yaml", {}, gate=_true)
 
 
 def _true() -> bool:

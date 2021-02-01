@@ -50,12 +50,17 @@ def locate(ctx: Context, file: str) -> Optional[Path]:
 
 
 def exec_file(
-    ctx: Context, file: str, env: Dict[str, str], *, predicate: FlagDelegate, stack: Optional[Stack] = None
+    ctx: Context, file: str, inout_env: Dict[str, str], *, gate: FlagDelegate, stack: Optional[Stack] = None
 ) -> int:
     """
     This function never raises exceptions in response to invalid syntax or a programmable error.
     Instead, it uses exit codes to report failures, to unify behavior with invoked processes.
     An exception may only indicate a bug in the implementation or an internal contract violation.
+
+    The env var dict is used both as the input and the output.
+    The provided values are inherited by the executed composition.
+    Afterwards, they are updated with the variables defined by the composition, which take precedence
+    over the supplied variables.
     """
     stack = stack or Stack()
     stack.log_debug(f"Locating file: {file!r} in:", *map(str, ctx.lookup_paths))
@@ -72,46 +77,44 @@ def exec_file(
         return int(ErrorCode.FILE_ERROR)
 
     try:
-        comp = load_composition(load_ast(source_text), env)
+        comp = load_composition(load_ast(source_text), inout_env.copy())
     except SchemaError as ex:
         stack.log_warning(f"Cannot load file {pth}: {ex}")
         return int(ErrorCode.SCHEMA_ERROR)
 
-    stack = stack.push(pth)
+    # Export the variables to the caller. Vars from the composition override the supplied vars.
+    inout_env.update(comp.env)
+
+    stack = stack.push(repr(file))
     stack.log_debug(f"Loaded composition:", str(comp))
-    return exec_composition(ctx, comp, predicate=predicate, stack=stack)
+    return exec_composition(ctx, comp, gate=gate, stack=stack)
 
 
-def exec_composition(ctx: Context, comp: Composition, *, predicate: FlagDelegate, stack: Stack) -> int:
-    def scr(node: str, scr: Sequence[Statement], inner_predicate: FlagDelegate) -> int:
+def exec_composition(ctx: Context, comp: Composition, *, gate: FlagDelegate, stack: Stack) -> int:
+    env = comp.env.copy()
+    for ca in comp.calls:  # The "env" is updated in-place.
+        res = exec_file(ctx, ca.file, env, gate=gate, stack=stack.push("call"))
+        if res != 0:
+            return res
+
+    def scr(node: str, scr: Sequence[Statement], inner_gate: FlagDelegate = lambda: True) -> int:
         inner_stack = stack.push(node)
         started_at = time.monotonic()
-        res = exec_script(
-            ctx, scr, comp.env.copy(), kill_timeout=comp.kill_timeout, predicate=inner_predicate, stack=inner_stack
-        )
+        res = exec_script(ctx, scr, env.copy(), kill_timeout=comp.kill_timeout, gate=inner_gate, stack=inner_stack)
         elapsed = time.monotonic() - started_at
         inner_stack.log_debug(f"Script exit status {res} in {elapsed:.1f} sec")
         return res
 
-    def finalize() -> int:
-        return scr(".", comp.finalizer, lambda: True)  # Finalizers cannot be interrupted.
-
-    res = scr("?", comp.predicate, predicate)
-    if res != 0:  # If any of the commands of the predicate fails, we simply skip the rest and report success.
+    res = scr("?", comp.predicate, gate)
+    if res != 0:  # If any of the commands of the predicate fail, we simply skip the rest and report success.
         return 0
 
-    res = scr("$", comp.main, predicate)
+    res = scr("$", comp.main, gate)
     if res != 0:  # The return code of a composition is that of the first failed process.
-        finalize()
+        scr(".", comp.finalizer)
         return res
 
-    if comp.delegate is not None:
-        res = exec_file(ctx, comp.delegate, comp.env.copy(), predicate=predicate, stack=stack.push("delegate"))
-        if res != 0:
-            finalize()
-            return res
-
-    return finalize()
+    return scr(".", comp.finalizer)
 
 
 def exec_script(
@@ -120,7 +123,7 @@ def exec_script(
     env: Dict[str, str],
     *,
     kill_timeout: float,
-    predicate: FlagDelegate,
+    gate: FlagDelegate,
     stack: Stack,
 ) -> int:
     """
@@ -131,8 +134,8 @@ def exec_script(
 
     first_failure_code: Optional[int] = None
 
-    def inner_predicate() -> bool:
-        return (first_failure_code is None) and predicate()
+    def inner_gate() -> bool:
+        return (first_failure_code is None) and gate()
 
     def accept_result(result: int) -> None:
         nonlocal first_failure_code
@@ -143,23 +146,19 @@ def exec_script(
     def launch_shell(inner_stack: Stack, cmd: str) -> Future[None]:
         return executor.submit(
             lambda: accept_result(
-                exec_shell(
-                    ctx, cmd, env.copy(), kill_timeout=kill_timeout, predicate=inner_predicate, stack=inner_stack
-                )
+                exec_shell(ctx, cmd, env.copy(), kill_timeout=kill_timeout, gate=inner_gate, stack=inner_stack)
             )
         )
 
     def launch_composition(inner_stack: Stack, comp: Composition) -> Future[None]:
-        return executor.submit(
-            lambda: accept_result(exec_composition(ctx, comp, predicate=inner_predicate, stack=inner_stack))
-        )
+        return executor.submit(lambda: accept_result(exec_composition(ctx, comp, gate=inner_gate, stack=inner_stack)))
 
     executor = ThreadPoolExecutor(max_workers=len(scr))
     pending: List[Future[None]] = []
     try:
         for index, stmt in enumerate(scr):
             stmt_stack = stack.push(index)
-            if not inner_predicate():
+            if not inner_gate():
                 break
             if isinstance(stmt, ShellStatement):
                 pending.append(launch_shell(stmt_stack, stmt.cmd))
@@ -187,7 +186,7 @@ def exec_script(
 
 
 def exec_shell(
-    ctx: Context, cmd: str, env: Dict[str, str], *, kill_timeout: float, predicate: FlagDelegate, stack: Stack
+    ctx: Context, cmd: str, env: Dict[str, str], *, kill_timeout: float, gate: FlagDelegate, stack: Stack
 ) -> int:
     started_at = time.monotonic()
     ch = Child(cmd, env, stdout=sys.stdout.buffer, stderr=sys.stderr.buffer)
@@ -202,7 +201,7 @@ def exec_shell(
             ),
         )
         ret: Optional[int] = None
-        while predicate() and ret is None:
+        while gate() and ret is None:
             ret = ch.poll(ctx.poll_interval)
         if ret is None:
             stack.log_warning(f"{prefix}Stopping (was started {time.monotonic() - started_at:.1f} sec ago)")

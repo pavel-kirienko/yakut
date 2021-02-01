@@ -4,7 +4,7 @@
 
 from __future__ import annotations
 import dataclasses
-from typing import Dict, Sequence, Any, Optional
+from typing import Dict, Sequence, Any, List
 from yakut.yaml import YAMLLoader
 from ._env import canonicalize_register, flatten_registers, NAME_SEP, EnvironmentVariableError
 
@@ -22,11 +22,19 @@ class SchemaError(ValueError):
 @dataclasses.dataclass(frozen=True)
 class Composition:
     env: Dict[str, str]
+    calls: Sequence[Call]
+
     predicate: Sequence[Statement]
     main: Sequence[Statement]
-    delegate: Optional[str]
     finalizer: Sequence[Statement]
-    kill_timeout: float = 20.0
+
+    @property
+    def kill_timeout(self) -> float:
+        try:
+            # This is very tentative and is not yet specified. May be changed.
+            return float(self.env.get("(kill_timeout)"))
+        except (ValueError, TypeError):
+            return 20.0
 
 
 @dataclasses.dataclass(frozen=True)
@@ -47,6 +55,11 @@ class CompositionStatement(Statement):
 @dataclasses.dataclass(frozen=True)
 class JoinStatement(Statement):
     pass
+
+
+@dataclasses.dataclass(frozen=True)
+class Call:
+    file: str
 
 
 def load_ast(text: str) -> Any:
@@ -82,16 +95,12 @@ def load_composition(ast: Any, env: Dict[str, str]) -> Composition:
     except EnvironmentVariableError as ex:
         raise SchemaError(f"Environment variable error: {ex}") from EnvironmentVariableError
 
-    delegate = ast.pop("delegate=", None)
-    if not (delegate is None or isinstance(delegate, str)):
-        raise SchemaError(f"Delegate argument shall be a string, not {type(delegate).__name__}")
-
     out = Composition(
         env=env.copy(),
-        predicate=load_script(ast.pop("?=", []), env),
-        main=load_script(ast.pop("$=", []), env),
-        delegate=delegate,
-        finalizer=load_script(ast.pop(".=", []), env),
+        calls=load_calls(ast.pop("call=", [])),
+        predicate=load_script(ast.pop("?=", []), env.copy()),
+        main=load_script(ast.pop("$=", []), env.copy()),
+        finalizer=load_script(ast.pop(".=", []), env.copy()),
     )
     unattended = [k for k in ast if NOT_ENV in k]
     if unattended:
@@ -113,3 +122,14 @@ def load_statement(ast: Any, env: Dict[str, str]) -> Statement:
     if ast is None:
         return JoinStatement()
     raise SchemaError("Statement shall be either: string (command to run), dict (nested schema), null (join)")
+
+
+def load_calls(ast: Any) -> List[Call]:
+    def item(inner: Any) -> Call:
+        if isinstance(inner, str):
+            return Call(inner)
+        raise SchemaError(f"Call arguments shall be strings, not {type(ast).__name__}")
+
+    if isinstance(ast, list):
+        return [item(x) for x in ast]
+    return [item(ast)]
