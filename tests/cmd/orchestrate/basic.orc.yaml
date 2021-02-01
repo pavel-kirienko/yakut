@@ -1,13 +1,13 @@
-$=:
+main=:
   - ?=: echo $GREETING              # GNU
   - ?=: Write-Host $env:GREETING    # Windows
-  - .=: sleep 5
+  - finally=: sleep 5
   -
   - echo bar
   - ?=:
-      $=: sleep 1
-      .=: unknown-command-failure-ignored
+      main=: sleep 1
+      finally=: unknown-command-failure-ignored
   -
   - exit 88
-.=: echo finalizer
+finally=: echo finalizer
 GREETING: Hello world!

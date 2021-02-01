@@ -1,15 +1,15 @@
-$=:
+main=:
   ?=: test -n "$PROCEED_B"
-  $=:
+  main=:
   - echo main b
-  - '[ "$PASSWORD" == "" ]'                       # Variable is not set here.
-  - '[ "$BAR" == "123" ]'                         # Old value from parent context.
-  - call=: tests/cmd/orchestrate/gnu/c.orc.yaml   # Invoke a dependency.
-    $=:
-    - '[ "$PASSWORD" == "hunter2" ]'              # Yup, the variable is now available.
-    - '[ "$BAR" == "789" ]'                       # Imported from the called context.
-  - '[ "$BAR" == "123" ]'                         # Still using the same old value.
-.=:
+  - '[ "$PASSWORD" == "" ]'                           # Variable is not set here.
+  - '[ "$BAR" == "123" ]'                             # Old value from parent context.
+  - external=: tests/cmd/orchestrate/gnu/c.orc.yaml   # Invoke a dependency.
+    main=:
+    - '[ "$PASSWORD" == "hunter2" ]'                  # Yup, the variable is now available.
+    - '[ "$BAR" == "789" ]'                           # Imported from the called context.
+  - '[ "$BAR" == "123" ]'                             # Still using the same old value.
+finally=:
 - echo finalizer b $PROCEED_B
 - sleep 1
 FOO: 123

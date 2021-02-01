@@ -1,4 +1,4 @@
-call=:
+external=:
 - vars.orc.yaml   # Sets   $VARIABLE
 - echo.orc.yaml   # Prints $VARIABLE
-.=: exit 99
+finally=: exit 99

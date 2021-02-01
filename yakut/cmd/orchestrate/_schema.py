@@ -22,11 +22,11 @@ class SchemaError(ValueError):
 @dataclasses.dataclass(frozen=True)
 class Composition:
     env: Dict[str, str]
-    calls: Sequence[Call]
+    ext: Sequence[External]
 
     predicate: Sequence[Statement]
     main: Sequence[Statement]
-    finalizer: Sequence[Statement]
+    fin: Sequence[Statement]
 
     @property
     def kill_timeout(self) -> float:
@@ -58,7 +58,7 @@ class JoinStatement(Statement):
 
 
 @dataclasses.dataclass(frozen=True)
-class Call:
+class External:
     file: str
 
 
@@ -97,10 +97,10 @@ def load_composition(ast: Any, env: Dict[str, str]) -> Composition:
 
     out = Composition(
         env=env.copy(),
-        calls=load_calls(ast.pop("call=", [])),
+        ext=load_external(ast.pop("external=", [])),
         predicate=load_script(ast.pop("?=", []), env.copy()),
-        main=load_script(ast.pop("$=", []), env.copy()),
-        finalizer=load_script(ast.pop(".=", []), env.copy()),
+        main=load_script(ast.pop("main=", []), env.copy()),
+        fin=load_script(ast.pop("finally=", []), env.copy()),
     )
     unattended = [k for k in ast if NOT_ENV in k]
     if unattended:
@@ -124,10 +124,10 @@ def load_statement(ast: Any, env: Dict[str, str]) -> Statement:
     raise SchemaError("Statement shall be either: string (command to run), dict (nested schema), null (join)")
 
 
-def load_calls(ast: Any) -> List[Call]:
-    def item(inner: Any) -> Call:
+def load_external(ast: Any) -> List[External]:
+    def item(inner: Any) -> External:
         if isinstance(inner, str):
-            return Call(inner)
+            return External(inner)
         raise SchemaError(f"Call arguments shall be strings, not {type(ast).__name__}")
 
     if isinstance(ast, list):

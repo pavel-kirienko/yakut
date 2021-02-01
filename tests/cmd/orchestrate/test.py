@@ -53,7 +53,7 @@ def _unittest_pub_sub() -> None:
 
 def _unittest_call() -> None:
     exit_code, stdout, _ = execute_cli(
-        "-v", f"--path={Path(__file__).parent}", "orc", "call.orc.yaml", timeout=60.0, ensure_success=False
+        "-v", f"--path={Path(__file__).parent}", "orc", "ext.orc.yaml", timeout=60.0, ensure_success=False
     )
     assert 99 == exit_code
     assert stdout.splitlines() == [

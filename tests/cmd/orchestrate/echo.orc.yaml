@@ -1,1 +1,1 @@
-$=: echo $VARIABLE
+main=: echo $VARIABLE

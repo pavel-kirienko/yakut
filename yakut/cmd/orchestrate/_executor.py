@@ -92,12 +92,12 @@ def exec_file(
 
 def exec_composition(ctx: Context, comp: Composition, *, gate: FlagDelegate, stack: Stack) -> int:
     env = comp.env.copy()
-    for ca in comp.calls:  # The "env" is updated in-place.
-        res = exec_file(ctx, ca.file, env, gate=gate, stack=stack.push("call"))
+    for ca in comp.ext:  # The "env" is updated in-place.
+        res = exec_file(ctx, ca.file, env, gate=gate, stack=stack.push("external"))
         if res != 0:
             return res
 
-    def scr(node: str, scr: Sequence[Statement], inner_gate: FlagDelegate = lambda: True) -> int:
+    def scr(node: str, scr: Sequence[Statement], inner_gate: FlagDelegate) -> int:
         inner_stack = stack.push(node)
         started_at = time.monotonic()
         res = exec_script(ctx, scr, env.copy(), kill_timeout=comp.kill_timeout, gate=inner_gate, stack=inner_stack)
@@ -106,15 +106,11 @@ def exec_composition(ctx: Context, comp: Composition, *, gate: FlagDelegate, sta
         return res
 
     res = scr("?", comp.predicate, gate)
-    if res != 0:  # If any of the commands of the predicate fail, we simply skip the rest and report success.
+    if res != 0:
         return 0
-
-    res = scr("$", comp.main, gate)
-    if res != 0:  # The return code of a composition is that of the first failed process.
-        scr(".", comp.finalizer)
-        return res
-
-    return scr(".", comp.finalizer)
+    res = scr("main", comp.main, gate)  # The return code of a composition is that of the first failed process.
+    res_fin = scr("finally", comp.fin, lambda: True)
+    return res if res != 0 else res_fin
 
 
 def exec_script(

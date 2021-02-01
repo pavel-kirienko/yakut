@@ -3,17 +3,17 @@
 #   DSDL_SRC=public_regulated_data_types/uavcan ~/uavcan/yakut/tests/cmd/orchestrate/pub_sub.orc.yaml
 
 # The main section. All commands run concurrently; empty statements are used to wait for commands started above (join).
-$=:
+main=:
 - yakut compile $DSDL_SRC               # Env var "DSDL_SRC" is to be set externally when invoking the orchestrator.
 -                                       # <-- This is a join statement. Here we wait for the compiler to finish.
 - yakut --format json sub --no-metadata 33.uavcan.si.unit.angle.Scalar.1.0 -N2
-- $=: >                                 # <-- Inner composition.
+- main=: >                              # <-- Inner composition.
       yakut pub -N5
       33.uavcan.si.unit.angle.Scalar.1.0 'radian: 2.31' uavcan.diagnostic.Record.1.1 'text: "2.31 rad"'
   YAKUT_TRANSPORT: UDP("127.42.0.9")    # Override the transport configuration for this composition.
 
 # This is finalizer. It is executed at the end always, even if main commands failed.
-.=:
+finally=:
 - ?=: rm -r $YAKUT_COMPILE_OUTPUT       # If running on GNU
 - ?=: rm -r $env:YAKUT_COMPILE_OUTPUT   # If running on Windows
 
